@@ -46,6 +46,7 @@ pub struct StatelessHookOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
+    pub additional_contexts: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -166,6 +167,7 @@ pub(crate) async fn run_post(
             hook_events: Vec::new(),
             should_stop: false,
             stop_reason: None,
+            additional_contexts: Vec::new(),
         };
     }
 
@@ -180,6 +182,7 @@ pub(crate) async fn run_post(
                 ),
                 should_stop: false,
                 stop_reason: None,
+                additional_contexts: Vec::new(),
             };
         }
     };
@@ -197,10 +200,16 @@ pub(crate) async fn run_post(
     let stop_reason = results
         .iter()
         .find_map(|result| result.data.stop_reason.clone());
+    let additional_contexts = common::flatten_additional_contexts(
+        results
+            .iter()
+            .map(|result| result.data.additional_contexts_for_model.as_slice()),
+    );
     StatelessHookOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
         should_stop,
         stop_reason,
+        additional_contexts,
     }
 }
 
@@ -223,6 +232,7 @@ fn post_command_input_json(request: &PostCompactRequest) -> Result<String, serde
 struct CompactHandlerData {
     should_stop: bool,
     stop_reason: Option<String>,
+    additional_contexts_for_model: Vec<String>,
 }
 
 fn parse_pre_completed(
@@ -307,6 +317,7 @@ fn parse_pre_completed(
         data: CompactHandlerData {
             should_stop,
             stop_reason,
+            additional_contexts_for_model: Vec::new(),
         },
         completion_order: 0,
     }
@@ -317,26 +328,11 @@ fn parse_post_completed(
     run_result: CommandRunResult,
     turn_id: Option<String>,
 ) -> dispatcher::ParsedHandler<CompactHandlerData> {
-    parse_completed(
-        handler,
-        run_result,
-        turn_id,
-        "PostCompact",
-        output_parser::parse_post_compact,
-    )
-}
-
-fn parse_completed(
-    handler: &ConfiguredHandler,
-    run_result: CommandRunResult,
-    turn_id: Option<String>,
-    event_label: &'static str,
-    parse_output: fn(&str) -> Option<output_parser::StatelessHookOutput>,
-) -> dispatcher::ParsedHandler<CompactHandlerData> {
     let mut entries = Vec::new();
     let mut status = HookRunStatus::Completed;
     let mut should_stop = false;
     let mut stop_reason = None;
+    let mut additional_contexts_for_model = Vec::new();
 
     match run_result.error.as_deref() {
         Some(error) => {
@@ -350,12 +346,22 @@ fn parse_completed(
             Some(0) => {
                 let trimmed_stdout = run_result.stdout.trim();
                 if trimmed_stdout.is_empty() {
-                } else if let Some(parsed) = parse_output(&run_result.stdout) {
+                } else if let Some(parsed) = output_parser::parse_post_compact(&run_result.stdout) {
                     if let Some(system_message) = parsed.universal.system_message {
                         entries.push(HookOutputEntry {
                             kind: HookOutputEntryKind::Warning,
                             text: system_message,
                         });
+                    }
+                    // Only structured JSON additionalContext is injected. Plain stdout is
+                    // intentionally ignored so log noise from PostCompact hooks is not promoted
+                    // into model context.
+                    if let Some(additional_context) = parsed.additional_context {
+                        common::append_additional_context(
+                            &mut entries,
+                            &mut additional_contexts_for_model,
+                            additional_context,
+                        );
                     }
                     let _ = parsed.universal.suppress_output;
                     if !parsed.universal.continue_processing {
@@ -364,10 +370,9 @@ fn parse_completed(
                         stop_reason = parsed.universal.stop_reason.clone();
                         entries.push(HookOutputEntry {
                             kind: HookOutputEntryKind::Stop,
-                            text: parsed
-                                .universal
-                                .stop_reason
-                                .unwrap_or_else(|| format!("{event_label} hook stopped execution")),
+                            text: parsed.universal.stop_reason.unwrap_or_else(|| {
+                                "PostCompact hook stopped execution".to_string()
+                            }),
                         });
                     } else if let Some(invalid_reason) = parsed.invalid_reason {
                         status = HookRunStatus::Failed;
@@ -380,7 +385,7 @@ fn parse_completed(
                     status = HookRunStatus::Failed;
                     entries.push(HookOutputEntry {
                         kind: HookOutputEntryKind::Error,
-                        text: format!("hook returned invalid {event_label} hook JSON output"),
+                        text: "hook returned invalid PostCompact hook JSON output".to_string(),
                     });
                 }
             }
@@ -410,6 +415,7 @@ fn parse_completed(
         data: CompactHandlerData {
             should_stop,
             stop_reason,
+            additional_contexts_for_model,
         },
         completion_order: 0,
     }
@@ -535,11 +541,79 @@ mod tests {
             Some("pause after compact".to_string())
         );
         assert_eq!(
+            parsed.data.additional_contexts_for_model,
+            Vec::<String>::new()
+        );
+        assert_eq!(
             parsed.completed.run.entries,
             vec![HookOutputEntry {
                 kind: HookOutputEntryKind::Stop,
                 text: "pause after compact".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn post_compact_additional_context_is_recorded() {
+        let parsed = parse_post_completed(
+            &handler(HookEventName::PostCompact),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PostCompact","additionalContext":"remember the reef"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(parsed.data.should_stop, false);
+        assert_eq!(
+            parsed.data.additional_contexts_for_model,
+            vec!["remember the reef".to_string()]
+        );
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "remember the reef".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn post_compact_continue_false_still_records_additional_context() {
+        let parsed = parse_post_completed(
+            &handler(HookEventName::PostCompact),
+            run_result(
+                Some(0),
+                r#"{"continue":false,"stopReason":"pause after compact","hookSpecificOutput":{"hookEventName":"PostCompact","additionalContext":"keep this context"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
+        assert_eq!(parsed.data.should_stop, true);
+        assert_eq!(
+            parsed.data.stop_reason,
+            Some("pause after compact".to_string())
+        );
+        assert_eq!(
+            parsed.data.additional_contexts_for_model,
+            vec!["keep this context".to_string()]
+        );
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Context,
+                    text: "keep this context".to_string(),
+                },
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Stop,
+                    text: "pause after compact".to_string(),
+                },
+            ]
         );
     }
 

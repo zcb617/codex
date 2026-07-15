@@ -70,6 +70,7 @@ pub(crate) struct PreCompactOutput {
 #[derive(Debug, Clone)]
 pub(crate) struct StatelessHookOutput {
     pub universal: UniversalOutput,
+    pub additional_context: Option<String>,
     pub invalid_reason: Option<String>,
 }
 
@@ -250,8 +251,12 @@ pub(crate) fn parse_pre_compact(stdout: &str) -> Option<PreCompactOutput> {
 pub(crate) fn parse_post_compact(stdout: &str) -> Option<StatelessHookOutput> {
     let wire: PostCompactCommandOutputWire = parse_json(stdout)?;
     let universal = UniversalOutput::from(wire.universal);
+    let additional_context = wire
+        .hook_specific_output
+        .and_then(|output| output.additional_context);
     Some(StatelessHookOutput {
         universal,
+        additional_context,
         invalid_reason: None,
     })
 }
