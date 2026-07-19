@@ -96,12 +96,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --bin codex
+          cargo build --release \
+            --bin codex \
+            --bin codex-code-mode-host
 
-      - name: Upload Linux CLI
+      - name: Stage Linux binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for name in codex codex-code-mode-host; do
+            cp "target/release/${name}" "dist/${name}"
+          done
+          ls -lh dist/
+
+      - name: Upload Linux binaries
         uses: actions/upload-artifact@v4
         with:
           name: codex-x86_64-unknown-linux-gnu
-          path: codex-rs/target/release/codex
+          path: |
+            codex-rs/dist/codex
+            codex-rs/dist/codex-code-mode-host
           if-no-files-found: error
           retention-days: 14
