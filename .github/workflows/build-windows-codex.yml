@@ -1,4 +1,4 @@
-name: Build Windows and Linux Codex CLI
+name: Build Windows Linux and macOS Codex CLI
 
 on:
   workflow_dispatch:
@@ -114,6 +114,65 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: codex-x86_64-unknown-linux-gnu
+          path: |
+            codex-rs/dist/codex
+            codex-rs/dist/codex-code-mode-host
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: Build codex (${{ matrix.target }})
+    runs-on: macos-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            artifact_name: codex-aarch64-apple-darwin
+          - target: x86_64-apple-darwin
+            artifact_name: codex-x86_64-apple-darwin
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          shared-key: macos-codex-cli-${{ matrix.target }}
+
+      - name: Build macOS CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --target "${{ matrix.target }}" \
+            --bin codex \
+            --bin codex-code-mode-host
+
+      - name: Stage macOS binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="target/${{ matrix.target }}/release"
+          mkdir -p dist
+          for name in codex codex-code-mode-host; do
+            cp "${release_dir}/${name}" "dist/${name}"
+          done
+          ls -lh dist/
+
+      - name: Upload macOS binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
           path: |
             codex-rs/dist/codex
             codex-rs/dist/codex-code-mode-host
