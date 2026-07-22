@@ -245,7 +245,8 @@ impl ClaudeHooksEngine {
         &self,
         request: PostCompactRequest,
     ) -> StatelessHookOutcome {
-        crate::events::compact::run_post(&self.handlers, &self.shell, request).await
+        crate::events::compact::run_post(&self.handlers, &self.shell, &self.output_spiller, request)
+            .await
     }
 
     pub(crate) fn preview_user_prompt_submit(

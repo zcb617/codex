@@ -15,6 +15,8 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
+use crate::output_spill::AdditionalContext;
+use crate::output_spill::HookOutputSpiller;
 use crate::schema::PostCompactCommandInput;
 use crate::schema::PreCompactCommandInput;
 use crate::schema::SubagentCommandInputFields;
@@ -155,8 +157,10 @@ pub(crate) fn preview_post(
 pub(crate) async fn run_post(
     handlers: &[ConfiguredHandler],
     shell: &CommandShell,
+    output_spiller: &HookOutputSpiller,
     request: PostCompactRequest,
 ) -> StatelessHookOutcome {
+    let session_id = request.session_id;
     let matched = dispatcher::select_handlers(
         handlers,
         HookEventName::PostCompact,
@@ -205,6 +209,9 @@ pub(crate) async fn run_post(
             .iter()
             .map(|result| result.data.additional_contexts_for_model.as_slice()),
     );
+    let additional_contexts = output_spiller
+        .maybe_spill_additional_contexts(session_id, additional_contexts)
+        .await;
     StatelessHookOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
         should_stop,
@@ -232,7 +239,7 @@ fn post_command_input_json(request: &PostCompactRequest) -> Result<String, serde
 struct CompactHandlerData {
     should_stop: bool,
     stop_reason: Option<String>,
-    additional_contexts_for_model: Vec<String>,
+    additional_contexts_for_model: Vec<AdditionalContext>,
 }
 
 fn parse_pre_completed(
@@ -360,6 +367,7 @@ fn parse_post_completed(
                         common::append_additional_context(
                             &mut entries,
                             &mut additional_contexts_for_model,
+                            handler,
                             additional_context,
                         );
                     }
@@ -439,6 +447,8 @@ mod tests {
     use super::pre_command_input_json;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::output_spill::AdditionalContext;
+    use crate::output_spill::AdditionalContextLimit;
 
     #[test]
     fn pre_compact_input_includes_lifecycle_metadata() {
@@ -542,7 +552,7 @@ mod tests {
         );
         assert_eq!(
             parsed.data.additional_contexts_for_model,
-            Vec::<String>::new()
+            Vec::<AdditionalContext>::new()
         );
         assert_eq!(
             parsed.completed.run.entries,
@@ -569,7 +579,10 @@ mod tests {
         assert_eq!(parsed.data.should_stop, false);
         assert_eq!(
             parsed.data.additional_contexts_for_model,
-            vec!["remember the reef".to_string()]
+            vec![AdditionalContext {
+                text: "remember the reef".to_string(),
+                limit: AdditionalContextLimit::default(),
+            }]
         );
         assert_eq!(
             parsed.completed.run.entries,
@@ -600,7 +613,10 @@ mod tests {
         );
         assert_eq!(
             parsed.data.additional_contexts_for_model,
-            vec!["keep this context".to_string()]
+            vec![AdditionalContext {
+                text: "keep this context".to_string(),
+                limit: AdditionalContextLimit::default(),
+            }]
         );
         assert_eq!(
             parsed.completed.run.entries,
