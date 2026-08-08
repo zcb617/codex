@@ -1118,7 +1118,7 @@ async fn default_context_truncates_catalog_descriptions() -> TestResult {
 #[tokio::test]
 async fn moderate_budget_pressure_keeps_every_catalog_entry() -> TestResult {
     let description = "x".repeat(1_025);
-    let executor_entries = (0..5)
+    let executor_entries = (0..10)
         .map(|index| {
             let package_id = format!("executor/executor-skill-{index:02}");
             let mut entry = test_entry(
@@ -1131,7 +1131,7 @@ async fn moderate_budget_pressure_keeps_every_catalog_entry() -> TestResult {
             entry
         })
         .collect();
-    let orchestrator_entries = (0..5)
+    let orchestrator_entries = (0..10)
         .map(|index| {
             let package_id = format!("orchestrator/orchestrator-skill-{index:02}");
             let mut entry = test_entry(
@@ -1191,7 +1191,7 @@ async fn moderate_budget_pressure_keeps_every_catalog_entry() -> TestResult {
     ]
     .into_iter()
     .flat_map(|(source, resource_kind, rendered)| {
-        (0..5).map(move |index| (source, resource_kind, rendered, index))
+        (0..10).map(move |index| (source, resource_kind, rendered, index))
     })
     .map(|(source, resource_kind, rendered, index)| {
         let name = format!("{source}-skill-{index:02}");

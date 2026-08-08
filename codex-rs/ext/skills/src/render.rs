@@ -16,8 +16,8 @@ use crate::catalog::SkillSourceKind;
 use crate::catalog_prompt::render_available_skills_body;
 use crate::fragments::AvailableSkillsInstructions;
 
-const DEFAULT_SKILL_METADATA_CHAR_BUDGET: usize = 8_000;
-const SKILL_METADATA_CONTEXT_WINDOW_PERCENT: usize = 2;
+const DEFAULT_SKILL_METADATA_CHAR_BUDGET: usize = 16_000;
+const SKILL_METADATA_CONTEXT_WINDOW_PERCENT: usize = 4;
 const MAX_CATALOG_SKILL_DESCRIPTION_CHARS: usize = 1_024;
 const TRUNCATED_SKILL_DESCRIPTION_SUFFIX: &str = "...";
 const SKILL_DESCRIPTION_TRUNCATION_WARNING_THRESHOLD_CHARS: usize = 100;
