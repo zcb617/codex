@@ -35,9 +35,33 @@ jobs:
       # v8 0.150+ prebuilts are published on openai/codex rusty-v8 releases,
       # not denoland/rusty_v8 (default crate download 404s in CI).
       - name: Configure rusty_v8 artifacts
+        id: rusty_v8
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-pc-windows-msvc
+
+      # rust-cache prunes the profile-level gn_out directory where v8 stores
+      # the prebuilt native library, so cache that output separately.
+      - name: Restore rusty_v8 native library
+        id: restore_rusty_v8
+        uses: actions/cache/restore@v4
+        with:
+          path: codex-rs/target/x86_64-pc-windows-msvc/release/gn_out/obj/rusty_v8.lib
+          key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-x86_64-pc-windows-msvc-${{ steps.rusty_v8.outputs.artifact_key }}
+
+      - name: Re-arm rusty_v8 build on cache miss
+        if: steps.restore_rusty_v8.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rebound_dir="${RUNNER_TEMP}/rusty_v8/${GITHUB_RUN_ID}"
+          mkdir -p "${rebound_dir}"
+          archive_path="${rebound_dir}/$(basename "${RUSTY_V8_ARCHIVE}")"
+          binding_path="${rebound_dir}/$(basename "${RUSTY_V8_SRC_BINDING_PATH}")"
+          cp "${RUSTY_V8_ARCHIVE}" "${archive_path}"
+          cp "${RUSTY_V8_SRC_BINDING_PATH}" "${binding_path}"
+          echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "${GITHUB_ENV}"
+          echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "${GITHUB_ENV}"
 
       - name: Build Windows binaries
         shell: bash
@@ -49,6 +73,13 @@ jobs:
             --bin codex-code-mode-host \
             --bin codex-windows-sandbox-setup \
             --bin codex-command-runner
+
+      - name: Save rusty_v8 native library
+        if: success() && steps.restore_rusty_v8.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: codex-rs/target/x86_64-pc-windows-msvc/release/gn_out/obj/rusty_v8.lib
+          key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-x86_64-pc-windows-msvc-${{ steps.rusty_v8.outputs.artifact_key }}
 
       - name: Stage artifacts
         shell: bash
@@ -102,9 +133,33 @@ jobs:
           shared-key: linux-codex-cli
 
       - name: Configure rusty_v8 artifacts
+        id: rusty_v8
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
+
+      # rust-cache prunes the profile-level gn_out directory where v8 stores
+      # the prebuilt native library, so cache that output separately.
+      - name: Restore rusty_v8 native library
+        id: restore_rusty_v8
+        uses: actions/cache/restore@v4
+        with:
+          path: codex-rs/target/x86_64-unknown-linux-gnu/release/gn_out/obj/librusty_v8.a
+          key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-x86_64-unknown-linux-gnu-${{ steps.rusty_v8.outputs.artifact_key }}
+
+      - name: Re-arm rusty_v8 build on cache miss
+        if: steps.restore_rusty_v8.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rebound_dir="${RUNNER_TEMP}/rusty_v8/${GITHUB_RUN_ID}"
+          mkdir -p "${rebound_dir}"
+          archive_path="${rebound_dir}/$(basename "${RUSTY_V8_ARCHIVE}")"
+          binding_path="${rebound_dir}/$(basename "${RUSTY_V8_SRC_BINDING_PATH}")"
+          cp "${RUSTY_V8_ARCHIVE}" "${archive_path}"
+          cp "${RUSTY_V8_SRC_BINDING_PATH}" "${binding_path}"
+          echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "${GITHUB_ENV}"
+          echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "${GITHUB_ENV}"
 
       - name: Build Linux CLI
         shell: bash
@@ -113,6 +168,13 @@ jobs:
           cargo build --release --target x86_64-unknown-linux-gnu \
             --bin codex \
             --bin codex-code-mode-host
+
+      - name: Save rusty_v8 native library
+        if: success() && steps.restore_rusty_v8.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: codex-rs/target/x86_64-unknown-linux-gnu/release/gn_out/obj/librusty_v8.a
+          key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-x86_64-unknown-linux-gnu-${{ steps.rusty_v8.outputs.artifact_key }}
 
       - name: Stage Linux binaries
         shell: bash
@@ -166,9 +228,33 @@ jobs:
           shared-key: macos-codex-cli-${{ matrix.target }}
 
       - name: Configure rusty_v8 artifacts
+        id: rusty_v8
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: ${{ matrix.target }}
+
+      # rust-cache prunes the profile-level gn_out directory where v8 stores
+      # the prebuilt native library, so cache that output separately.
+      - name: Restore rusty_v8 native library
+        id: restore_rusty_v8
+        uses: actions/cache/restore@v4
+        with:
+          path: codex-rs/target/${{ matrix.target }}/release/gn_out/obj/librusty_v8.a
+          key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-${{ matrix.target }}-${{ steps.rusty_v8.outputs.artifact_key }}
+
+      - name: Re-arm rusty_v8 build on cache miss
+        if: steps.restore_rusty_v8.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rebound_dir="${RUNNER_TEMP}/rusty_v8/${GITHUB_RUN_ID}"
+          mkdir -p "${rebound_dir}"
+          archive_path="${rebound_dir}/$(basename "${RUSTY_V8_ARCHIVE}")"
+          binding_path="${rebound_dir}/$(basename "${RUSTY_V8_SRC_BINDING_PATH}")"
+          cp "${RUSTY_V8_ARCHIVE}" "${archive_path}"
+          cp "${RUSTY_V8_SRC_BINDING_PATH}" "${binding_path}"
+          echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "${GITHUB_ENV}"
+          echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "${GITHUB_ENV}"
 
       - name: Build macOS CLI
         shell: bash
@@ -177,6 +263,13 @@ jobs:
           cargo build --release --target "${{ matrix.target }}" \
             --bin codex \
             --bin codex-code-mode-host
+
+      - name: Save rusty_v8 native library
+        if: success() && steps.restore_rusty_v8.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: codex-rs/target/${{ matrix.target }}/release/gn_out/obj/librusty_v8.a
+          key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-${{ matrix.target }}-${{ steps.rusty_v8.outputs.artifact_key }}
 
       - name: Stage macOS binaries
         shell: bash
