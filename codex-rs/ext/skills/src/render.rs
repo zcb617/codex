@@ -13,9 +13,9 @@ use crate::catalog_prompt::render_available_skills_body;
 use crate::fragments::AvailableSkillsInstructions;
 use crate::host_aliases::shared_host_alias_roots;
 
-const DEFAULT_SKILL_METADATA_CHAR_BUDGET: usize = 8_000;
+const DEFAULT_SKILL_METADATA_CHAR_BUDGET: usize = 16_000;
 const MAX_SKILL_PROMPT_BYTES: usize = 8_000;
-const SKILL_METADATA_CONTEXT_WINDOW_PERCENT: usize = 2;
+const SKILL_METADATA_CONTEXT_WINDOW_PERCENT: usize = 4;
 const MAX_CATALOG_SKILL_DESCRIPTION_CHARS: usize = 1_024;
 const TRUNCATED_SKILL_DESCRIPTION_SUFFIX: &str = "...";
 const SKILL_DESCRIPTION_TRUNCATION_WARNING_THRESHOLD_CHARS: usize = 100;

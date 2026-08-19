@@ -1471,7 +1471,7 @@ async fn production_turn_scales_extension_catalog_from_resolved_model_window() -
     let skill_count = 800;
     let mut included_counts = Vec::new();
     for (context_window, max_context_window, expected_budget) in
-        [(Some(10_000), None, 200), (None, Some(400_000), 8_000)]
+        [(Some(10_000), None, 400), (None, Some(400_000), 16_000)]
     {
         let server = responses::start_mock_server().await;
         let response = mount_sse_once(
@@ -1583,7 +1583,7 @@ async fn production_turn_shortens_host_only_catalog_with_the_full_budget() -> Re
     let host_lines = skill_lines(catalog_text(&developer_texts, "host"), "host");
 
     assert_shortened_descriptions(&host_lines, &HOST_CATALOG);
-    assert!(metadata_cost(&host_lines) <= 240);
+    assert!(metadata_cost(&host_lines) <= 480);
 
     Ok(())
 }
@@ -1595,7 +1595,7 @@ async fn production_turn_shortens_executor_only_catalog_with_the_full_budget() -
     let executor_lines = skill_lines(catalog_text(&developer_texts, "exec"), "exec");
 
     assert_shortened_descriptions(&executor_lines, &EXECUTOR_CATALOG);
-    assert!(metadata_cost(&executor_lines) <= 240);
+    assert!(metadata_cost(&executor_lines) <= 480);
 
     Ok(())
 }
@@ -1614,7 +1614,7 @@ async fn production_turn_shares_catalog_budget_across_host_and_executor_sections
 
     assert_shortened_descriptions(&host_lines, &HOST_CATALOG);
     assert_shortened_descriptions(&executor_lines, &EXECUTOR_CATALOG);
-    assert!(metadata_cost(&combined_lines) <= 240);
+    assert!(metadata_cost(&combined_lines) <= 480);
 
     Ok(())
 }
