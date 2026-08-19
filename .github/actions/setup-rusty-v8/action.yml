@@ -5,10 +5,19 @@ inputs:
     description: Rust target triple with Codex-built V8 release artifacts.
     required: true
 
+outputs:
+  version:
+    description: Resolved v8 crate version.
+    value: ${{ steps.configure.outputs.version }}
+  artifact_key:
+    description: Hash of the upstream V8 artifact checksum manifest.
+    value: ${{ steps.configure.outputs.artifact_key }}
+
 runs:
   using: composite
   steps:
     - name: Configure rusty_v8 artifact overrides and verify checksums
+      id: configure
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
@@ -18,8 +27,8 @@ runs:
         version="$(python3 "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)"
         release_tag="rusty-v8-v${version}"
         base_url="https://github.com/openai/codex/releases/download/${release_tag}"
-        binding_dir="${RUNNER_TEMP}/rusty_v8"
-        
+        binding_dir="${RUNNER_TEMP}/rusty_v8/${version}/${TARGET}"
+
         profile="ptrcomp_sandbox_release"
 
         if [[ "$TARGET" == *-pc-windows-msvc ]]; then
@@ -50,5 +59,13 @@ runs:
         else
           (cd "${binding_dir}" && tr -d '\r' < "${checksums_path}" | shasum -a 256 -c -)
         fi
+        if command -v sha256sum >/dev/null 2>&1; then
+          artifact_key="$(sha256sum "${checksums_path}" | awk '{print $1}')"
+        else
+          artifact_key="$(shasum -a 256 "${checksums_path}" | awk '{print $1}')"
+        fi
+
+        echo "version=${version}" >> "${GITHUB_OUTPUT}"
+        echo "artifact_key=${artifact_key}" >> "${GITHUB_OUTPUT}"
         echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "${GITHUB_ENV}"
         echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "${GITHUB_ENV}"
