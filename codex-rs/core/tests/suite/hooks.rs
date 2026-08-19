@@ -1007,6 +1007,57 @@ print(json.dumps({{
     Ok(())
 }
 
+fn write_post_compact_hook_with_context(home: &Path, additional_context: &str) -> Result<()> {
+    let script_path = home.join("post_compact_hook.py");
+    let log_path = home.join("post_compact_hook_log.jsonl");
+    let additional_context_json = serde_json::to_string(additional_context)
+        .context("serialize post compact additional context for test")?;
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+
+print(json.dumps({{
+    "hookSpecificOutput": {{
+        "hookEventName": "PostCompact",
+        "additionalContext": {additional_context_json}
+    }}
+}}))
+"#,
+        log_path = log_path.display(),
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "PostCompact": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "running post compact hook",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write post compact hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
+fn read_post_compact_hook_inputs(home: &Path) -> Result<Vec<Value>> {
+    let log_path = home.join("post_compact_hook_log.jsonl");
+    let contents = fs::read_to_string(&log_path)
+        .with_context(|| format!("read post compact hook log at {}", log_path.display()))?;
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).context("parse post compact hook log line"))
+        .collect()
+}
+
 enum DynamicCompactSessionStartHook {
     IndexedContexts,
     Stop,
@@ -2069,6 +2120,149 @@ async fn compact_session_start_hook_records_additional_context_for_next_turn() -
     assert_eq!(
         hook_inputs[0].get("source").and_then(Value::as_str),
         Some("compact")
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_compact_hook_records_additional_context_immediately() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg-1", "hello before compact"),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-2", "summary after compact"),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-3", "hello after compact"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+    let additional_context = "remember the post-compact reef";
+    let model_provider = non_openai_model_provider(&server);
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            write_post_compact_hook_with_context(home, additional_context)
+                .expect("failed to write post compact hook fixture");
+        })
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            trust_discovered_hooks(config);
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("hello before compact").await?;
+    test.codex.submit(Op::Compact).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    test.submit_turn("hello after compact").await?;
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        !requests[0]
+            .message_input_texts("developer")
+            .iter()
+            .any(|message| message == additional_context),
+        "PostCompact should not run before compaction",
+    );
+    assert!(
+        requests[2]
+            .message_input_texts("developer")
+            .iter()
+            .any(|message| message == additional_context),
+        "PostCompact should inject additional context for the next model turn",
+    );
+
+    let hook_inputs = read_post_compact_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(
+        hook_inputs[0]
+            .get("hook_event_name")
+            .and_then(Value::as_str),
+        Some("PostCompact")
+    );
+    assert_eq!(
+        hook_inputs[0].get("trigger").and_then(Value::as_str),
+        Some("manual")
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_compact_hook_injects_context_on_mid_turn_auto_compact() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let context_window = 100;
+    let limit = context_window * 90 / 100;
+    let over_limit_tokens = context_window * 95 / 100 + 1;
+    let additional_context = "remember mid-turn post-compact context";
+
+    let first_turn = sse(vec![
+        ev_function_call("call-post-compact", "test_tool", "{}"),
+        ev_completed_with_tokens("r1", over_limit_tokens),
+    ]);
+    let auto_compact_turn = sse(vec![
+        ev_assistant_message("m2", "summary after mid-turn compact"),
+        ev_completed_with_tokens("r2", /*total_tokens*/ 10),
+    ]);
+    let post_auto_compact_turn = sse(vec![
+        ev_assistant_message("m3", "continued after mid-turn compact"),
+        ev_completed_with_tokens("r3", /*total_tokens*/ 10),
+    ]);
+
+    let _first_turn_mock = mount_sse_once(&server, first_turn).await;
+    let _auto_compact_mock = mount_sse_once(&server, auto_compact_turn).await;
+    let post_auto_compact_mock = mount_sse_once(&server, post_auto_compact_turn).await;
+
+    let model_provider = non_openai_model_provider(&server);
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            write_post_compact_hook_with_context(home, additional_context)
+                .expect("failed to write post compact hook fixture");
+        })
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.model_context_window = Some(context_window);
+            config.model_auto_compact_token_limit = Some(limit);
+            trust_discovered_hooks(config);
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("trigger mid-turn compact").await?;
+
+    let post_compact_request = post_auto_compact_mock.single_request();
+    assert!(
+        post_compact_request
+            .message_input_texts("developer")
+            .iter()
+            .any(|message| message == additional_context),
+        "PostCompact should inject additional context into the same-turn continuation after auto compact",
+    );
+
+    let hook_inputs = read_post_compact_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(
+        hook_inputs[0].get("trigger").and_then(Value::as_str),
+        Some("auto")
     );
 
     Ok(())
