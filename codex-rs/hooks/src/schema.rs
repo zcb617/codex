@@ -181,6 +181,18 @@ pub(crate) struct PreCompactCommandOutputWire {
 pub(crate) struct PostCompactCommandOutputWire {
     #[serde(flatten)]
     pub universal: HookUniversalOutputWire,
+    #[serde(default)]
+    pub hook_specific_output: Option<PostCompactHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PostCompactHookSpecificOutputWire {
+    #[schemars(schema_with = "post_compact_hook_event_name_schema")]
+    pub hook_event_name: HookEventNameWire,
+    #[serde(default)]
+    pub additional_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
