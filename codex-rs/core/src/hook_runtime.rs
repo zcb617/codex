@@ -462,6 +462,10 @@ pub(crate) async fn run_post_compact_hooks(
 
     let outcome = sess.hooks().run_post_compact(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
+    // Inject immediately after compaction so mid-turn continuations (and the next
+    // model sample in the same turn) see the restored context without waiting for
+    // SessionStart(source=compact), which only runs on the next user turn.
+    record_additional_contexts(sess, turn_context, outcome.additional_contexts).await;
     if outcome.should_stop {
         PostCompactHookOutcome::Stopped
     } else {
