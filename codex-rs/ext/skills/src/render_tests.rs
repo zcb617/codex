@@ -195,17 +195,17 @@ fn description_selection_follows_render_policy() {
 fn catalog_budget_uses_context_percentage_or_character_fallback() {
     assert_eq!(
         skill_metadata_budget(Some(100_000), /*max_context_tokens*/ None),
-        SkillMetadataBudget::Tokens(2_000)
+        SkillMetadataBudget::Tokens(4_000)
     );
     assert_eq!(
         skill_metadata_budget(Some(400_000), /*max_context_tokens*/ None),
-        SkillMetadataBudget::Tokens(8_000)
+        SkillMetadataBudget::Tokens(16_000)
     );
     assert_eq!(
         skill_metadata_budget(
             /*context_window*/ None, /*max_context_tokens*/ None
         ),
-        SkillMetadataBudget::Characters(8_000)
+        SkillMetadataBudget::Characters(16_000)
     );
     assert_eq!(
         skill_metadata_budget(Some(100_000), NonZeroUsize::new(5_000)),
