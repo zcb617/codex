@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - dev/from-rust-v0.149.0
+      - dev/from-rust-v0.149.1
 
 permissions:
   contents: read
