@@ -19,10 +19,30 @@ Automate the recurring upgrade and CLI publish for **this** Codex fork (`zcb617/
 2. Create `dev/from-rust-vX.Y.Z`
 3. Port local custom commits (PostCompact + skills metadata budget + fork CLI publisher)
 4. Delete the upstream release workflows that the new tag brings back
-5. Compile-check and commit
+5. Local **check** only (see Local machine policy), then commit
 6. Stop for push. After the user authorizes: push the branch, retarget `rust-vX.Y.Z` onto **fork HEAD**, push that tag so Actions publishes the GitHub Release
 
 Always answer the user in **中文**.
+
+## Local machine policy（磁盘）
+
+本机磁盘紧。**禁止本机编译**；本机**只能做检查**。编译、测试、打包全部交给 push 之后的 GitHub Actions。本条覆盖仓库 `AGENTS.md` 里「改完跑 `just test`」的要求。
+
+允许：
+
+- `git` / `rg` / `test -f` 核对文件、常量和 workflow
+- `cargo check -p <改到的 crate>`（通常 `codex-hooks`、`codex-core`）
+- check 若无真实依赖变更却改脏了 `codex-rs/Cargo.lock`，立刻还原成 tag 基线
+- check 一结束立刻 `rm -rf codex-rs/target`，**不准把 target 留在磁盘上**
+
+禁止（用户在本轮对话里明确要求覆盖之前一律不准）：
+
+- `cargo build`、`--release`、跑编出来的 `codex`
+- `cargo test`、`just test`、`cargo nextest`、`just bench`
+- 工作区级 `just fix` / 全量 clippy
+- 本机打包 CLI
+
+`cargo check` 也会写 `codex-rs/target`。检查完不删，等于编译占盘。
 
 ## Prerequisites / remotes
 
@@ -208,12 +228,15 @@ git checkout rust-vX.Y.Z -- codex-rs/Cargo.lock
 
 ### 6. Verify
 
-Minimum:
+本机只检查，不编译。先做文件/常量核对；Rust 侧最多 `cargo check`，然后马上删 `target`。
 
 ```bash
 cd codex-rs
 cargo check -p codex-hooks
 cargo check -p codex-core
+cd ..
+git checkout rust-vX.Y.Z -- codex-rs/Cargo.lock   # 无真实依赖变更时
+rm -rf codex-rs/target
 ```
 
 After porting, confirm skills budget landed:
@@ -235,12 +258,7 @@ rg -n 'rust-v\*\.\*\.\*|publish-github-release|GH_REPO' .github/workflows/build-
 
 Fail the upgrade if `GH_REPO` is missing from the publish job. Without it, packing succeeds then `gh release` dies with `not a git repository`.
 
-Optional (longer, if user asked to package/build):
-
-```bash
-cargo build --release -p codex-cli
-./target/release/codex --version   # expect matching X.Y.Z
-```
+本机验证到此结束。编译和测试见 Local machine policy。
 
 ### 7. Commit
 
@@ -271,7 +289,7 @@ Tell the user in 中文:
 - New branch name and base tag
 - Commits on top of the tag (`git log --oneline rust-vX.Y.Z..HEAD`)
 - `git describe --tags --always HEAD` (this will usually show the **upstream** tag, not fork HEAD)
-- Compile check result
+- `cargo check` 结果，以及已删除 `codex-rs/target`
 - That the branch is **local only** until they authorize push
 - The publish commands below, and that they are **not** run until authorized
 
@@ -334,6 +352,7 @@ After upgrade, `.github/workflows/build-windows-codex.yml` must:
 | Skills budget cherry-pick fails / files missing | Search the names in section D; patch current crate (`ext/skills` or `core-skills`); update tests and `2%` copy |
 | New branch still shows 8_000 / 2% | Stop; budget port did not land |
 | Dirty `Cargo.lock` after check | Prefer tag lockfile if no new crates |
+| `codex-rs/target` left after check | `rm -rf codex-rs/target`；本机不准留编译产物 |
 | Tag push built the wrong commit / no Release | Tag was still the upstream object; retarget onto fork HEAD and push the tag again (force only with user approval) |
 | `rust-release` workflow started on the fork | Section C files came back; delete them, they cannot succeed here |
 | Publish job: `failed to run git: not a git repository` | Packing succeeded but `gh` had no repo; set `GH_REPO` on the publish job (do not re-run the old workflow file) |
@@ -343,6 +362,7 @@ After upgrade, `.github/workflows/build-windows-codex.yml` must:
 - Syncing GitHub “Sync fork” alone does **not** replace this flow (tags/branches are not auto-mirrored forever).
 - Desktop App “Computer Use” packaging (x64 missing plugin) is **not** fixed by this skill.
 - Do not force-push or rewrite published history without user request.
+- Do not compile, test, or package on this machine; see Local machine policy.
 
 ## Quick command summary
 
@@ -357,6 +377,7 @@ git checkout -b "$BRANCH" "$TAG"
 # port skills metadata budget (16_000 / 4%) by content if needed
 # copy fork CLI publisher; delete section C workflows restored by the tag
 cd codex-rs && cargo check -p codex-hooks && cargo check -p codex-core
+cd .. && rm -rf codex-rs/target
 # commit remaining changes
 # wait for user before:
 #   git push -u origin "$BRANCH"
