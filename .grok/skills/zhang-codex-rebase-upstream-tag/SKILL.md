@@ -84,9 +84,10 @@ These are the fork-local changes that must land on every new tag branch (names/s
 - File: `.github/workflows/build-windows-codex.yml` (filename historical; covers Win + Linux + macOS)
 - `on.push.tags: rust-v*.*.*` plus `workflow_dispatch`
 - Jobs (parallel):
-  - **Windows** `x86_64-pc-windows-msvc`: `codex`, `codex-code-mode-host`, `codex-windows-sandbox-setup`, `codex-command-runner` → sibling `dist/*.exe`
-  - **Linux** `ubuntu-latest` host build: `codex`, `codex-code-mode-host`
-  - **macOS** matrix `macos-latest`: `aarch64-apple-darwin` + `x86_64-apple-darwin` → `codex` + `codex-code-mode-host`
+  - **Windows** `x86_64-pc-windows-msvc`: package directory, not sibling exes. `bin/codex.exe`, `bin/codex-code-mode-host.exe`, `codex-resources/codex-windows-sandbox-setup.exe`, `codex-resources/codex-command-runner.exe`, `codex-path/rg.exe`, `codex-package.json`
+  - **Linux** `ubuntu-latest`: `bin/codex`, `bin/codex-code-mode-host`, `codex-resources/bwrap`, `codex-path/rg`, `codex-package.json`
+  - **macOS** matrix `macos-latest` `aarch64-apple-darwin` + `x86_64-apple-darwin`: `bin/codex`, `bin/codex-code-mode-host`, `codex-path/rg`, `codex-package.json`
+- The executable the user runs must be `bin/codex` (Windows: `bin/codex.exe`). A flat archive of loose binaries is not a package, and startup fails with `this CLI has no complete local package`.
 - Tag builds: `publish-github-release` waits for all platform jobs, packs archives, creates/updates the GitHub Release for that tag
 - The publish job does **not** checkout the repo; it must set `GH_REPO: ${{ github.repository }}` so `gh release` can see the fork
 - `workflow_dispatch` uploads platform artifacts (retention ~14 days) but does not create a Release
@@ -335,9 +336,9 @@ After upgrade, `.github/workflows/build-windows-codex.yml` must:
 
 - [ ] `on.push.tags` is `rust-v*.*.*` (not a branch trigger)
 - [ ] `publish-github-release` exists, runs only when `github.ref_type == 'tag'`, and sets `GH_REPO`
-- [ ] Windows builds four bins (CLI + code-mode-host + two sandbox helpers)
-- [ ] Linux builds `codex` + `codex-code-mode-host`
-- [ ] macOS matrix builds arm64 + x86_64 (`codex` + `codex-code-mode-host`)
+- [ ] Windows package has `bin/codex.exe`, `bin/codex-code-mode-host.exe`, both sandbox helpers under `codex-resources/`, `codex-path/rg.exe`, and `codex-package.json`
+- [ ] Linux package has `bin/codex`, `bin/codex-code-mode-host`, `codex-resources/bwrap`, `codex-path/rg`, and `codex-package.json`
+- [ ] macOS matrix builds arm64 + x86_64 packages (`bin/codex`, `bin/codex-code-mode-host`, `codex-path/rg`, `codex-package.json`)
 - [ ] Artifacts uploaded per platform
 - [ ] Every file in section C is absent
 
