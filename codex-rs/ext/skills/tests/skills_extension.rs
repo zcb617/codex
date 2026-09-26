@@ -1362,7 +1362,7 @@ async fn default_context_truncates_catalog_descriptions() -> TestResult {
 #[tokio::test]
 async fn moderate_budget_pressure_keeps_every_catalog_entry() -> TestResult {
     let description = "x".repeat(1_025);
-    let executor_entries = (0..5)
+    let executor_entries = (0..10)
         .map(|index| {
             let package_id = format!("executor/executor-skill-{index:02}");
             let mut entry = test_entry(
@@ -1375,7 +1375,7 @@ async fn moderate_budget_pressure_keeps_every_catalog_entry() -> TestResult {
             entry
         })
         .collect();
-    let cloud_entries = (0..5)
+    let cloud_entries = (0..10)
         .map(|index| {
             let package_id = format!("cloud/cloud-skill-{index:02}");
             let mut entry = test_entry(
@@ -1432,7 +1432,7 @@ async fn moderate_budget_pressure_keeps_every_catalog_entry() -> TestResult {
         skill_world_state_fragments(&registry, &session_store, &thread_store, "turn-1").await?;
     let description_lengths = [("executor", executor.body()), ("cloud", cloud.body())]
         .into_iter()
-        .flat_map(|(source, rendered)| (0..5).map(move |index| (source, rendered, index)))
+        .flat_map(|(source, rendered)| (0..10).map(move |index| (source, rendered, index)))
         .map(|(source, rendered, index)| {
             let name = format!("{source}-skill-{index:02}");
             let package_id = format!("{source}/{name}");
@@ -1487,7 +1487,7 @@ async fn extreme_budget_pressure_removes_descriptions_before_omitting_entries() 
             entry
         })
         .collect();
-    let cloud_entries = (0..160)
+    let cloud_entries = (0..320)
         .map(|index| {
             let package_id = format!("cloud/cloud-skill-{index:03}");
             let mut entry = test_entry(
@@ -1556,14 +1556,14 @@ async fn extreme_budget_pressure_removes_descriptions_before_omitting_entries() 
         .count();
     assert_eq!(40, included_executor_count);
     assert!(included_cloud_count > 0);
-    assert!(included_cloud_count < 160);
+    assert!(included_cloud_count < 320);
     assert!(
         executor
             .body()
             .contains("- executor-skill-039: (executor package:")
     );
     assert!(cloud.body().contains("- cloud-skill-000: (cloud package:"));
-    assert!(!cloud.body().contains("- cloud-skill-159:"));
+    assert!(!cloud.body().contains("- cloud-skill-319:"));
     for rendered in [executor.body(), cloud.body()] {
         assert!(!rendered.contains("description-"));
     }
@@ -1572,7 +1572,7 @@ async fn extreme_budget_pressure_removes_descriptions_before_omitting_entries() 
             .body()
             .contains("additional skills omitted from this bounded skills list")
     );
-    let omitted_count = 200 - included_executor_count - included_cloud_count;
+    let omitted_count = 360 - included_executor_count - included_cloud_count;
     let warning = event_rx.try_recv()?.into_warning();
     assert_eq!(warning.thread_id, "thread");
     assert_eq!(warning.turn_id.as_deref(), Some("turn-1"));
