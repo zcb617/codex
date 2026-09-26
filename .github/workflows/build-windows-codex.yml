@@ -90,33 +90,32 @@ jobs:
           path: codex-rs/target/x86_64-pc-windows-msvc/release/gn_out/obj/rusty_v8.lib
           key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-x86_64-pc-windows-msvc-${{ steps.rusty_v8.outputs.artifact_key }}
 
-      - name: Stage package
+      - name: Stage artifacts
         shell: bash
         run: |
           set -euo pipefail
           release_dir="target/x86_64-pc-windows-msvc/release"
-          pkg="dist/package"
-          rm -rf "${pkg}"
-          mkdir -p "${pkg}/bin" "${pkg}/codex-path" "${pkg}/codex-resources"
-          cp "${release_dir}/codex.exe" "${pkg}/bin/codex.exe"
-          cp "${release_dir}/codex-code-mode-host.exe" "${pkg}/bin/codex-code-mode-host.exe"
-          cp "${release_dir}/codex-windows-sandbox-setup.exe" "${pkg}/codex-resources/codex-windows-sandbox-setup.exe"
-          cp "${release_dir}/codex-command-runner.exe" "${pkg}/codex-resources/codex-command-runner.exe"
-          curl -fsSL -o "${RUNNER_TEMP}/rg.zip" \
-            https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip
-          rm -rf "${RUNNER_TEMP}/rg"
-          mkdir -p "${RUNNER_TEMP}/rg"
-          tar -xf "${RUNNER_TEMP}/rg.zip" -C "${RUNNER_TEMP}/rg"
-          cp "${RUNNER_TEMP}/rg/ripgrep-15.2.0-x86_64-pc-windows-msvc/rg.exe" "${pkg}/codex-path/rg.exe"
-          version="$(awk '/^\[workspace.package\]/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
-          CODEX_PACKAGE_VERSION="${version}" python -c 'import json,os,pathlib; pathlib.Path("dist/package/codex-package.json").write_text(json.dumps({"layoutVersion":1,"version":os.environ["CODEX_PACKAGE_VERSION"],"target":"x86_64-pc-windows-msvc","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}, indent=2)+"\n", encoding="utf-8")'
-          find "${pkg}" -type f -print
+          # Sibling layout: CLI resolves helpers next to current_exe.
+          mkdir -p dist
+          for name in \
+            codex.exe \
+            codex-code-mode-host.exe \
+            codex-windows-sandbox-setup.exe \
+            codex-command-runner.exe
+          do
+            cp "${release_dir}/${name}" "dist/${name}"
+          done
+          ls -lh dist/
 
-      - name: Upload Windows package
+      - name: Upload Windows binaries
         uses: actions/upload-artifact@v4
         with:
           name: codex-x86_64-pc-windows-msvc
-          path: codex-rs/dist/package
+          path: |
+            codex-rs/dist/codex.exe
+            codex-rs/dist/codex-code-mode-host.exe
+            codex-rs/dist/codex-windows-sandbox-setup.exe
+            codex-rs/dist/codex-command-runner.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -177,8 +176,7 @@ jobs:
           set -euo pipefail
           cargo build --release --target x86_64-unknown-linux-gnu \
             --bin codex \
-            --bin codex-code-mode-host \
-            --bin bwrap
+            --bin codex-code-mode-host
 
       - name: Save rusty_v8 native library
         if: success() && steps.restore_rusty_v8.outputs.cache-hit != 'true'
@@ -187,31 +185,24 @@ jobs:
           path: codex-rs/target/x86_64-unknown-linux-gnu/release/gn_out/obj/librusty_v8.a
           key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-x86_64-unknown-linux-gnu-${{ steps.rusty_v8.outputs.artifact_key }}
 
-      - name: Stage Linux package
+      - name: Stage Linux binaries
         shell: bash
         run: |
           set -euo pipefail
           release_dir="target/x86_64-unknown-linux-gnu/release"
-          pkg="dist/package"
-          rm -rf "${pkg}"
-          mkdir -p "${pkg}/bin" "${pkg}/codex-path" "${pkg}/codex-resources"
-          cp "${release_dir}/codex" "${pkg}/bin/codex"
-          cp "${release_dir}/codex-code-mode-host" "${pkg}/bin/codex-code-mode-host"
-          cp "${release_dir}/bwrap" "${pkg}/codex-resources/bwrap"
-          curl -fsSL -o "${RUNNER_TEMP}/rg.tar.gz" \
-            https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz
-          tar -xzf "${RUNNER_TEMP}/rg.tar.gz" -C "${RUNNER_TEMP}"
-          cp "${RUNNER_TEMP}/ripgrep-15.2.0-x86_64-unknown-linux-musl/rg" "${pkg}/codex-path/rg"
-          chmod +x "${pkg}/bin/codex" "${pkg}/bin/codex-code-mode-host" "${pkg}/codex-path/rg" "${pkg}/codex-resources/bwrap"
-          version="$(awk '/^\[workspace.package\]/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
-          CODEX_PACKAGE_VERSION="${version}" python3 -c 'import json,os,pathlib; pathlib.Path("dist/package/codex-package.json").write_text(json.dumps({"layoutVersion":1,"version":os.environ["CODEX_PACKAGE_VERSION"],"target":"x86_64-unknown-linux-gnu","variant":"codex","entrypoint":"bin/codex","resourcesDir":"codex-resources","pathDir":"codex-path"}, indent=2)+"\n", encoding="utf-8")'
-          find "${pkg}" -type f -print
+          mkdir -p dist
+          for name in codex codex-code-mode-host; do
+            cp "${release_dir}/${name}" "dist/${name}"
+          done
+          ls -lh dist/
 
-      - name: Upload Linux package
+      - name: Upload Linux binaries
         uses: actions/upload-artifact@v4
         with:
           name: codex-x86_64-unknown-linux-gnu
-          path: codex-rs/dist/package
+          path: |
+            codex-rs/dist/codex
+            codex-rs/dist/codex-code-mode-host
           if-no-files-found: error
           retention-days: 14
 
@@ -289,46 +280,24 @@ jobs:
           path: codex-rs/target/${{ matrix.target }}/release/gn_out/obj/librusty_v8.a
           key: rusty-v8-${{ steps.rusty_v8.outputs.version }}-${{ matrix.target }}-${{ steps.rusty_v8.outputs.artifact_key }}
 
-      - name: Stage macOS package
+      - name: Stage macOS binaries
         shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          release_dir="target/${TARGET}/release"
-          pkg="dist/package"
-          rm -rf "${pkg}"
-          mkdir -p "${pkg}/bin" "${pkg}/codex-path" "${pkg}/codex-resources"
-          cp "${release_dir}/codex" "${pkg}/bin/codex"
-          cp "${release_dir}/codex-code-mode-host" "${pkg}/bin/codex-code-mode-host"
-          case "${TARGET}" in
-            aarch64-apple-darwin)
-              rg_archive="ripgrep-15.2.0-aarch64-apple-darwin.tar.gz"
-              rg_dir="ripgrep-15.2.0-aarch64-apple-darwin"
-              ;;
-            x86_64-apple-darwin)
-              rg_archive="ripgrep-15.2.0-x86_64-apple-darwin.tar.gz"
-              rg_dir="ripgrep-15.2.0-x86_64-apple-darwin"
-              ;;
-            *)
-              echo "unsupported macOS target ${TARGET}" >&2
-              exit 1
-              ;;
-          esac
-          curl -fsSL -o "${RUNNER_TEMP}/rg.tar.gz" \
-            "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/${rg_archive}"
-          tar -xzf "${RUNNER_TEMP}/rg.tar.gz" -C "${RUNNER_TEMP}"
-          cp "${RUNNER_TEMP}/${rg_dir}/rg" "${pkg}/codex-path/rg"
-          chmod +x "${pkg}/bin/codex" "${pkg}/bin/codex-code-mode-host" "${pkg}/codex-path/rg"
-          version="$(awk '/^\[workspace.package\]/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
-          CODEX_PACKAGE_VERSION="${version}" CODEX_PACKAGE_TARGET="${TARGET}" python3 -c 'import json,os,pathlib; pathlib.Path("dist/package/codex-package.json").write_text(json.dumps({"layoutVersion":1,"version":os.environ["CODEX_PACKAGE_VERSION"],"target":os.environ["CODEX_PACKAGE_TARGET"],"variant":"codex","entrypoint":"bin/codex","resourcesDir":"codex-resources","pathDir":"codex-path"}, indent=2)+"\n", encoding="utf-8")'
-          find "${pkg}" -type f -print
+          release_dir="target/${{ matrix.target }}/release"
+          mkdir -p dist
+          for name in codex codex-code-mode-host; do
+            cp "${release_dir}/${name}" "dist/${name}"
+          done
+          ls -lh dist/
 
-      - name: Upload macOS package
+      - name: Upload macOS binaries
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: codex-rs/dist/package
+          path: |
+            codex-rs/dist/codex
+            codex-rs/dist/codex-code-mode-host
           if-no-files-found: error
           retention-days: 14
 
@@ -362,12 +331,13 @@ jobs:
           asset_tag="${tag//\//-}"
           mkdir -p release-assets
 
-          package_dir() {
+          artifact_dir() {
             local artifact_name="$1"
+            local probe="$2"
             local found
-            found="$(find "artifacts/${artifact_name}" -type f -name codex-package.json -print | head -n 1)"
+            found="$(find "artifacts/${artifact_name}" -type f -name "${probe}" -print | head -n 1)"
             if [[ -z "${found}" ]]; then
-              echo "could not find codex-package.json in artifacts/${artifact_name}" >&2
+              echo "could not find ${probe} in artifacts/${artifact_name}" >&2
               find "artifacts/${artifact_name}" -print >&2 || true
               exit 1
             fi
@@ -387,72 +357,41 @@ jobs:
             done
           }
 
-          pack_unix() {
-            local dir="$1"
-            local archive="$2"
-            shift 2
-            chmod +x "$@"
-            tar -C "${dir}" -czf "${archive}" \
-              codex-package.json \
-              bin \
-              codex-path \
-              codex-resources
-          }
-
-          win_dir="$(package_dir codex-x86_64-pc-windows-msvc)"
+          win_dir="$(artifact_dir codex-x86_64-pc-windows-msvc codex.exe)"
           require_files "${win_dir}" \
-            codex-package.json \
-            bin/codex.exe \
-            bin/codex-code-mode-host.exe \
-            codex-path/rg.exe \
-            codex-resources/codex-windows-sandbox-setup.exe \
-            codex-resources/codex-command-runner.exe
+            codex.exe \
+            codex-code-mode-host.exe \
+            codex-windows-sandbox-setup.exe \
+            codex-command-runner.exe
           (
             cd "${win_dir}"
-            zip -r "${GITHUB_WORKSPACE}/release-assets/codex-${asset_tag}-x86_64-pc-windows-msvc.zip" \
-              codex-package.json \
-              bin \
-              codex-path \
-              codex-resources
+            zip "${GITHUB_WORKSPACE}/release-assets/codex-${asset_tag}-x86_64-pc-windows-msvc.zip" \
+              codex.exe \
+              codex-code-mode-host.exe \
+              codex-windows-sandbox-setup.exe \
+              codex-command-runner.exe
           )
 
-          linux_dir="$(package_dir codex-x86_64-unknown-linux-gnu)"
-          require_files "${linux_dir}" \
-            codex-package.json \
-            bin/codex \
-            bin/codex-code-mode-host \
-            codex-path/rg \
-            codex-resources/bwrap
-          pack_unix "${linux_dir}" \
+          linux_dir="$(artifact_dir codex-x86_64-unknown-linux-gnu codex)"
+          require_files "${linux_dir}" codex codex-code-mode-host
+          tar -C "${linux_dir}" -czf \
             "release-assets/codex-${asset_tag}-x86_64-unknown-linux-gnu.tar.gz" \
-            "${linux_dir}/bin/codex" \
-            "${linux_dir}/bin/codex-code-mode-host" \
-            "${linux_dir}/codex-path/rg" \
-            "${linux_dir}/codex-resources/bwrap"
+            codex \
+            codex-code-mode-host
 
-          macos_arm_dir="$(package_dir codex-aarch64-apple-darwin)"
-          require_files "${macos_arm_dir}" \
-            codex-package.json \
-            bin/codex \
-            bin/codex-code-mode-host \
-            codex-path/rg
-          pack_unix "${macos_arm_dir}" \
+          macos_arm_dir="$(artifact_dir codex-aarch64-apple-darwin codex)"
+          require_files "${macos_arm_dir}" codex codex-code-mode-host
+          tar -C "${macos_arm_dir}" -czf \
             "release-assets/codex-${asset_tag}-aarch64-apple-darwin.tar.gz" \
-            "${macos_arm_dir}/bin/codex" \
-            "${macos_arm_dir}/bin/codex-code-mode-host" \
-            "${macos_arm_dir}/codex-path/rg"
+            codex \
+            codex-code-mode-host
 
-          macos_x64_dir="$(package_dir codex-x86_64-apple-darwin)"
-          require_files "${macos_x64_dir}" \
-            codex-package.json \
-            bin/codex \
-            bin/codex-code-mode-host \
-            codex-path/rg
-          pack_unix "${macos_x64_dir}" \
+          macos_x64_dir="$(artifact_dir codex-x86_64-apple-darwin codex)"
+          require_files "${macos_x64_dir}" codex codex-code-mode-host
+          tar -C "${macos_x64_dir}" -czf \
             "release-assets/codex-${asset_tag}-x86_64-apple-darwin.tar.gz" \
-            "${macos_x64_dir}/bin/codex" \
-            "${macos_x64_dir}/bin/codex-code-mode-host" \
-            "${macos_x64_dir}/codex-path/rg"
+            codex \
+            codex-code-mode-host
 
           ls -lh release-assets/
 
