@@ -1645,7 +1645,7 @@ async fn catalog_rebalances_only_to_avoid_omissions_and_retains_the_allocation()
                         assert_eq!(
                             cloud.snapshot()["allocation"],
                             serde_json::json!({
-                                "totalBudget": {"tokens": 4_000}, "cloudLimit": 3_000,
+                                "totalBudget": {"tokens": 8_000}, "cloudLimit": 6_000,
                                 "cloudCatalogFingerprint": previous["cloud_skills"]["allocation"]["cloudCatalogFingerprint"],
                             })
                         );
