@@ -209,7 +209,8 @@ jobs:
   build-macos:
     name: Build codex (${{ matrix.target }})
     runs-on: macos-latest
-    timeout-minutes: 120
+    # macos-latest is arm64; x86_64 is cross-compiled and can exceed 2h.
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
