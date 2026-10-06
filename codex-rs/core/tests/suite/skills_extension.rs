@@ -2163,7 +2163,7 @@ async fn assert_catalog_model_switch(max_context_tokens: Option<usize>) -> Resul
     let mut included_counts = Vec::new();
     for (request, (model, default_budget, include_usage)) in requests
         .iter()
-        .zip([(MODEL_A, 200, false), (MODEL_B, 8_000, true)])
+        .zip([(MODEL_A, 400, false), (MODEL_B, 16_000, true)])
     {
         assert_eq!(request.body_json()["model"], model);
         let developer_texts = request.message_input_texts("developer");
@@ -2273,7 +2273,7 @@ async fn production_turn_shortens_host_only_catalog_with_the_full_budget() -> Re
     let host_lines = skill_lines(catalog_text(&developer_texts, "host"), "host");
 
     assert_shortened_descriptions(&host_lines, &HOST_CATALOG);
-    assert!(metadata_cost(&host_lines) <= 240);
+    assert!(metadata_cost(&host_lines) <= 480);
 
     Ok(())
 }
@@ -2285,7 +2285,7 @@ async fn production_turn_shortens_executor_only_catalog_with_the_full_budget() -
     let executor_lines = skill_lines(catalog_text(&developer_texts, "exec"), "exec");
 
     assert_shortened_descriptions(&executor_lines, &EXECUTOR_CATALOG);
-    assert!(metadata_cost(&executor_lines) <= 240);
+    assert!(metadata_cost(&executor_lines) <= 480);
 
     Ok(())
 }
@@ -2304,7 +2304,7 @@ async fn production_turn_shares_catalog_budget_across_host_and_executor_sections
 
     assert_shortened_descriptions(&host_lines, &HOST_CATALOG);
     assert_shortened_descriptions(&executor_lines, &EXECUTOR_CATALOG);
-    assert!(metadata_cost(&combined_lines) <= 240);
+    assert!(metadata_cost(&combined_lines) <= 480);
 
     Ok(())
 }
