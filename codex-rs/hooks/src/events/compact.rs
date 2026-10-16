@@ -15,6 +15,7 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::HandlerRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
+use crate::output_spill::AdditionalContext;
 use crate::schema::PostCompactCommandInput;
 use crate::schema::PreCompactCommandInput;
 use crate::schema::SubagentCommandInputFields;
@@ -46,6 +47,7 @@ pub struct StatelessHookOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
+    pub additional_contexts: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -164,6 +166,7 @@ pub(crate) async fn run_post(
             hook_events: Vec::new(),
             should_stop: false,
             stop_reason: None,
+            additional_contexts: Vec::new(),
         };
     }
 
@@ -178,6 +181,7 @@ pub(crate) async fn run_post(
                 ),
                 should_stop: false,
                 stop_reason: None,
+                additional_contexts: Vec::new(),
             };
         }
     };
@@ -195,10 +199,21 @@ pub(crate) async fn run_post(
     let stop_reason = results
         .iter()
         .find_map(|result| result.data.stop_reason.clone());
+    let additional_contexts = common::flatten_additional_contexts(
+        results
+            .iter()
+            .map(|result| result.data.additional_contexts_for_model.as_slice()),
+    );
+    let additional_contexts = engine
+        .command_runtime
+        .output_spiller()
+        .maybe_spill_additional_contexts(additional_contexts)
+        .await;
     StatelessHookOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
         should_stop,
         stop_reason,
+        additional_contexts,
     }
 }
 
@@ -221,6 +236,7 @@ fn post_command_input_json(request: &PostCompactRequest) -> Result<String, serde
 struct CompactHandlerData {
     should_stop: bool,
     stop_reason: Option<String>,
+    additional_contexts_for_model: Vec<AdditionalContext>,
 }
 
 fn parse_pre_completed(
@@ -262,6 +278,7 @@ fn parse_completed(
     let mut status = HookRunStatus::Completed;
     let mut should_stop = false;
     let mut stop_reason = None;
+    let mut additional_contexts_for_model = Vec::new();
 
     match run_result.error.as_deref() {
         Some(error) => {
@@ -281,6 +298,14 @@ fn parse_completed(
                             kind: HookOutputEntryKind::Warning,
                             text: system_message,
                         });
+                    }
+                    if let Some(additional_context) = parsed.additional_context {
+                        common::append_additional_context(
+                            &mut entries,
+                            &mut additional_contexts_for_model,
+                            handler,
+                            additional_context,
+                        );
                     }
                     let _ = parsed.universal.suppress_output;
                     if handler.can_apply_control_effects() {
@@ -336,6 +361,7 @@ fn parse_completed(
         data: CompactHandlerData {
             should_stop,
             stop_reason,
+            additional_contexts_for_model,
         },
         completion_order: 0,
     }
@@ -359,6 +385,8 @@ mod tests {
     use super::pre_command_input_json;
     use crate::engine::ConfiguredHandler;
     use crate::engine::HandlerRunResult;
+    use crate::output_spill::AdditionalContext;
+    use crate::output_spill::AdditionalContextLimit;
 
     #[test]
     fn pre_compact_input_includes_lifecycle_metadata() {
@@ -441,6 +469,76 @@ mod tests {
                 kind: HookOutputEntryKind::Stop,
                 text: "nope".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn post_compact_additional_context_is_recorded() {
+        let parsed = parse_post_completed(
+            &handler(HookEventName::PostCompact),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PostCompact","additionalContext":"remember the reef"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(parsed.data.should_stop, false);
+        assert_eq!(
+            parsed.data.additional_contexts_for_model,
+            vec![AdditionalContext {
+                text: "remember the reef".to_string(),
+                limit: AdditionalContextLimit::default(),
+            }]
+        );
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "remember the reef".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn post_compact_continue_false_still_records_additional_context() {
+        let parsed = parse_post_completed(
+            &handler(HookEventName::PostCompact),
+            run_result(
+                Some(0),
+                r#"{"continue":false,"stopReason":"pause after compact","hookSpecificOutput":{"hookEventName":"PostCompact","additionalContext":"keep this context"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
+        assert_eq!(parsed.data.should_stop, true);
+        assert_eq!(
+            parsed.data.stop_reason,
+            Some("pause after compact".to_string())
+        );
+        assert_eq!(
+            parsed.data.additional_contexts_for_model,
+            vec![AdditionalContext {
+                text: "keep this context".to_string(),
+                limit: AdditionalContextLimit::default(),
+            }]
+        );
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Context,
+                    text: "keep this context".to_string(),
+                },
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Stop,
+                    text: "pause after compact".to_string(),
+                },
+            ]
         );
     }
 
