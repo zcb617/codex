@@ -30,10 +30,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # @ref is the compiler this action installs. It does not read
+      # codex-rs/rust-toolchain.toml. Keep it equal to that file's channel.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy, rustfmt, rust-src
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -130,10 +133,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # @ref is the compiler this action installs. It does not read
+      # codex-rs/rust-toolchain.toml. Keep it equal to that file's channel.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: x86_64-unknown-linux-gnu
+          components: clippy, rustfmt, rust-src
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -226,10 +232,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # @ref is the compiler this action installs. It does not read
+      # codex-rs/rust-toolchain.toml. Keep it equal to that file's channel.
+      # macos-latest is arm64. Passing targets to the action has not been
+      # enough to put x86_64 std on the toolchain cargo actually runs.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.target }}
+          components: clippy, rustfmt, rust-src
+
+      - name: Install macOS compile target
+        shell: bash
+        run: rustup target add "${{ matrix.target }}" --toolchain 1.99.1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
