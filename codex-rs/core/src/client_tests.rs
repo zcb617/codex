@@ -1017,6 +1017,63 @@ fn websocket_continuation_reports_unavailable_response_state() {
     );
 }
 
+#[test]
+fn discard_websocket_continuation_drops_truncated_id_and_keeps_later_clean_id() {
+    let client = test_model_client(SessionSource::Cli);
+    let request = client
+        .build_responses_request(
+            &Prompt::default(),
+            &test_model_info(),
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &test_responses_metadata_for_client(
+                &client,
+                /*turn_id*/ None,
+                format!("{}:0", client.state.thread_id),
+                /*parent_thread_id*/ None,
+                TestCodexResponsesRequestKind::Turn,
+            ),
+            /*include_internal*/ true,
+        )
+        .expect("build continuation request");
+    let mut session = client.new_session();
+    session.websocket_session.last_request = Some(request.clone());
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    sender
+        .send(super::LastResponse {
+            response_id: "truncated-response".to_string(),
+            items_added: Vec::new(),
+        })
+        .unwrap();
+    session.websocket_session.last_response_rx = Some(receiver);
+    session.discard_websocket_continuation("reasoning_truncation_replay");
+    assert_eq!(
+        session.prepare_websocket_request(&request).err(),
+        Some(NonIncrementalReason::NoPreviousResponse),
+    );
+    assert_eq!(
+        session.websocket_session.continuation_reset_reason,
+        Some("reasoning_truncation_replay"),
+    );
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    sender
+        .send(super::LastResponse {
+            response_id: "clean-response".to_string(),
+            items_added: Vec::new(),
+        })
+        .unwrap();
+    session.websocket_session.last_response_rx = Some(receiver);
+    assert_eq!(
+        session
+            .prepare_websocket_request(&request)
+            .map(|continuation| continuation.response_id),
+        Ok("clean-response".to_string()),
+    );
+}
+
 #[tokio::test]
 async fn responses_http_preserves_raw_tool_metadata_for_openai_custom_endpoint()
 -> anyhow::Result<()> {

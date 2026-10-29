@@ -118,6 +118,8 @@ pub enum Feature {
     CodexHooks,
     /// Store CLI auth in the encrypted local secrets backend when keyring storage is selected.
     SecretAuthStorage,
+    /// 516 推理截断时重放完整请求，不接被截断响应。
+    ReasoningTruncationReplay,
 
     /// Automatically start the shared local daemon for eligible interactive launches.
     DaemonAutoStart,
@@ -1103,6 +1105,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ShellTool,
         key: "shell_tool",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::ReasoningTruncationReplay,
+        key: "reasoning_truncation_replay",
         stage: Stage::Stable,
         default_enabled: true,
     },

@@ -31,6 +31,7 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
+use crate::reasoning_truncation;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -1769,6 +1770,7 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
+    let mut truncation_round: u32 = 1;
     loop {
         // Running code-mode cells can request review while this response is in flight.
         // Keep the latest received ID until response.created replaces it.
@@ -1783,6 +1785,9 @@ async fn run_sampling_request(
         sess.services
             .executed_tool_calls
             .attach_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output);
+        if truncation_round > 1 {
+            prompt_input.push(reasoning_truncation::commentary_marker());
+        }
         let mut prompt = build_prompt(
             prompt_input,
             step_context.as_ref(),
@@ -1813,11 +1818,19 @@ async fn run_sampling_request(
             &prompt,
             cancellation_token.child_token(),
             &mut draining_for_mailbox,
+            truncation_round,
         )
         .await
         {
-            Ok(output) => {
-                return Ok((output, original_input.unwrap_or(prompt.input)));
+            Ok(SamplingAttempt::Finished(output)) => {
+                return Ok((
+                    output,
+                    sampling_input_without_commentary(original_input, prompt.input),
+                ));
+            }
+            Ok(SamplingAttempt::ReplayTruncation) => {
+                truncation_round += 1;
+                continue;
             }
             Err(err) => match err.details() {
                 CodexErrorDetails::ContextWindowExceeded => {
@@ -1866,6 +1879,21 @@ async fn run_sampling_request(
         retry??;
         turn_context.turn_timing_state.record_sampling_retry();
     }
+}
+
+/// 从交回回合循环的输入副本末尾去掉重放 commentary；已经发出的请求保持原样。
+fn sampling_input_without_commentary(
+    original_input: Option<Vec<ResponseItem>>,
+    prompt_input: Vec<ResponseItem>,
+) -> Vec<ResponseItem> {
+    let mut input = original_input.unwrap_or(prompt_input);
+    if input
+        .last()
+        .is_some_and(|item| item == &reasoning_truncation::commentary_marker())
+    {
+        input.pop();
+    }
+    input
 }
 
 pub(crate) struct PreparedToolRecommendations {
@@ -2643,6 +2671,20 @@ fn assign_missing_streamed_response_item_id(
     Session::assign_missing_response_item_id(item);
 }
 
+/// 单次采样尝试的终态：接受本轮结果，或因 516 推理截断整轮重放。
+enum SamplingAttempt {
+    /// 本轮采样已经结束，携带交给回合循环的结果。
+    Finished(SamplingRequestResult),
+    /// 本轮命中推理截断指纹，丢弃正文和工具调用后重放。
+    ReplayTruncation,
+}
+
+/// 功能开启时先攒住、待 Completed 判定后再决定是否落历史的非 reasoning 输出项。
+struct PendingNonReasoning {
+    /// 被截断轮可能丢弃、接受轮再按原顺序处理的响应项。
+    item: ResponseItem,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "trace",
     skip_all,
@@ -2662,7 +2704,8 @@ async fn try_run_sampling_request(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
     draining_for_mailbox: &mut bool,
-) -> CodexResult<SamplingRequestResult> {
+    truncation_round: u32,
+) -> CodexResult<SamplingAttempt> {
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
         model = step_context.settings.model_info.slug.clone(),
@@ -2784,6 +2827,12 @@ async fn try_run_sampling_request(
     let mut should_emit_token_count = false;
     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
     let mut analytics_tool_call_ids = Vec::new();
+    let replay_enabled = turn_context
+        .config
+        .features
+        .enabled(Feature::ReasoningTruncationReplay);
+    let mut withheld_non_reasoning: Vec<PendingNonReasoning> = Vec::new();
+    let mut last_reasoning_encrypted = false;
     let reasoning_effort = step_context
         .settings
         .reasoning_effort()
@@ -2801,7 +2850,7 @@ async fn try_run_sampling_request(
         !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
     let receiving_span = trace_span!("receiving_stream");
-    let outcome: CodexResult<SamplingRequestResult> = loop {
+    let outcome: CodexResult<SamplingAttempt> = 'sampling_events: loop {
         let handle_responses = trace_span!(
             parent: &receiving_span,
             "handle_responses",
@@ -2843,10 +2892,10 @@ async fn try_run_sampling_request(
                 }
                 // TODO: Reconcile any response item already being presented to the client.
                 drop(stream);
-                break Ok(SamplingRequestResult {
+                break Ok(SamplingAttempt::Finished(SamplingRequestResult {
                     needs_follow_up: true,
                     last_agent_message,
-                });
+                }));
             }
             Err(_) => break Err(CodexErr::TurnAborted),
         };
@@ -2878,10 +2927,10 @@ async fn try_run_sampling_request(
                 if *draining_for_mailbox && matches!(err.details(), CodexErrorDetails::Stream(_)) {
                     // Mail already requires a follow-up, even if the producer exited before
                     // receiving the interrupt. Do not retry without that pending input.
-                    break Ok(SamplingRequestResult {
+                    break Ok(SamplingAttempt::Finished(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
-                    });
+                    }));
                 }
                 break Err(err);
             }
@@ -2901,6 +2950,15 @@ async fn try_run_sampling_request(
                 }
             }
             ResponseEvent::OutputItemDone(mut item) => {
+                if replay_enabled && !matches!(item, ResponseItem::Reasoning { .. }) {
+                    withheld_non_reasoning.push(PendingNonReasoning { item });
+                    continue;
+                }
+                if let ResponseItem::Reasoning { encrypted_content, .. } = &item {
+                    last_reasoning_encrypted = encrypted_content
+                        .as_ref()
+                        .is_some_and(|value| !value.is_empty());
+                }
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 sess.reserve_assistant_message_order(&turn_context, &item)
                     .await;
@@ -3046,13 +3104,16 @@ async fn try_run_sampling_request(
                         needs_follow_up = true;
                         continue;
                     }
-                    break Ok(SamplingRequestResult {
+                    break Ok(SamplingAttempt::Finished(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
-                    });
+                    }));
                 }
             }
             ResponseEvent::OutputItemAdded(mut item) => {
+                if replay_enabled && !matches!(item, ResponseItem::Reasoning { .. }) {
+                    continue;
+                }
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 sess.reserve_assistant_message_order(&turn_context, &item)
                     .await;
@@ -3199,52 +3260,163 @@ async fn try_run_sampling_request(
             } => {
                 response_completed = true;
                 request_token_usage = token_usage.clone();
-                sess.services
-                    .analytics_events_client
-                    .track_code_mode_tool_call(
-                        codex_analytics::CodeModeToolCallFact::SamplingResponseCompleted {
-                            thread_id: sess.thread_id.to_string(),
-                            turn_id: turn_context.sub_id.clone(),
-                            response_id: response_id.clone(),
-                            tool_call_ids: std::mem::take(&mut analytics_tool_call_ids),
-                        },
-                    );
-                flush_assistant_text_segments_all(
-                    &sess,
-                    &turn_context,
-                    plan_mode_state.as_mut(),
-                    &mut assistant_message_stream_parsers,
-                )
-                .await;
-                sess.record_observed_response_completed(
-                    &turn_context,
-                    &response_id,
-                    token_usage.as_ref(),
-                    usage_metadata.as_ref(),
-                )
-                .await;
-                let budget_result = sess
-                    .record_token_usage_info(
-                        &turn_context,
-                        &step_context.settings,
-                        token_usage.as_ref(),
-                        super::TokenUsageContext::Sampling,
+                let decision = if replay_enabled {
+                    reasoning_truncation::decide(
+                        token_usage
+                            .as_ref()
+                            .map(|usage| usage.reasoning_output_tokens),
+                        truncation_round,
+                        last_reasoning_encrypted,
                     )
-                    .await;
-                should_emit_token_count = true;
-                should_emit_turn_diff = true;
-                if let Err(err) = budget_result {
-                    break Err(err);
+                } else {
+                    reasoning_truncation::TruncationDecision::Accept {
+                        still_truncated: false,
+                    }
+                };
+                let (decision_name, still_truncated, should_log) = match &decision {
+                    reasoning_truncation::TruncationDecision::Replay => ("replay", false, true),
+                    reasoning_truncation::TruncationDecision::Accept {
+                        still_truncated: true,
+                    } => ("accept", true, true),
+                    reasoning_truncation::TruncationDecision::Accept {
+                        still_truncated: false,
+                    } => ("accept", false, false),
+                };
+                if should_log {
+                    tracing::info!(
+                        truncation_round,
+                        reasoning_output_tokens = token_usage
+                            .as_ref()
+                            .map(|usage| usage.reasoning_output_tokens),
+                        decision = decision_name,
+                        still_truncated,
+                    );
                 }
-                if let Some(false) = end_turn {
-                    needs_follow_up = true;
+                match decision {
+                    reasoning_truncation::TruncationDecision::Replay => {
+                        withheld_non_reasoning.clear();
+                        client_session
+                            .discard_websocket_continuation("reasoning_truncation_replay");
+                        break 'sampling_events Ok(SamplingAttempt::ReplayTruncation);
+                    }
+                    reasoning_truncation::TruncationDecision::Accept { .. } => {
+                        for pending in withheld_non_reasoning.drain(..) {
+                            let mut item = pending.item;
+                            assign_missing_streamed_response_item_id(&mut item, None);
+                            sess.reserve_assistant_message_order(&turn_context, &item)
+                                .await;
+                            if analytics_tool_call_ids.len()
+                                < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE
+                            {
+                                let call_id = match &item {
+                                    ResponseItem::FunctionCall { call_id, .. }
+                                    | ResponseItem::CustomToolCall { call_id, .. } => {
+                                        Some(call_id.as_str())
+                                    }
+                                    ResponseItem::ToolSearchCall { call_id, .. }
+                                    | ResponseItem::LocalShellCall { call_id, .. } => {
+                                        call_id.as_deref()
+                                    }
+                                    ResponseItem::WebSearchCall { id, .. }
+                                    | ResponseItem::ImageGenerationCall { id, .. } => {
+                                        id.as_ref().map(codex_protocol::ResponseItemId::as_str)
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(call_id) = call_id {
+                                    analytics_tool_call_ids.push(call_id.to_string());
+                                }
+                            }
+                            if let Some(state) = plan_mode_state.as_mut()
+                                && handle_assistant_item_done_in_plan_mode(
+                                    &sess,
+                                    &step_context,
+                                    turn_store.as_ref(),
+                                    &item,
+                                    state,
+                                    None,
+                                    &mut last_agent_message,
+                                )
+                                .await
+                            {
+                                continue;
+                            }
+                            let mut ctx = HandleOutputCtx {
+                                sess: sess.clone(),
+                                step_context: Arc::clone(&step_context),
+                                turn_store: Arc::clone(&turn_store),
+                                tool_runtime: tool_runtime.clone(),
+                                defer_tool_dispatch: defer_tool_dispatch || *draining_for_mailbox,
+                                cancellation_token: cancellation_token.child_token(),
+                            };
+                            if *draining_for_mailbox {
+                                ctx.cancellation_token.cancel();
+                            }
+                            let output_result = match handle_output_item_done(&mut ctx, item, None)
+                                .await
+                            {
+                                Ok(output_result) => output_result,
+                                Err(err) => break 'sampling_events Err(err),
+                            };
+                            if let Some(tool_future) = output_result.tool_future {
+                                in_flight.push_back(tool_future);
+                            }
+                            if let Some(agent_message) = output_result.last_agent_message {
+                                last_agent_message = Some(agent_message);
+                            }
+                            needs_follow_up |= output_result.needs_follow_up;
+                        }
+                        sess.services
+                            .analytics_events_client
+                            .track_code_mode_tool_call(
+                                codex_analytics::CodeModeToolCallFact::SamplingResponseCompleted {
+                                    thread_id: sess.thread_id.to_string(),
+                                    turn_id: turn_context.sub_id.clone(),
+                                    response_id: response_id.clone(),
+                                    tool_call_ids: std::mem::take(&mut analytics_tool_call_ids),
+                                },
+                            );
+                        flush_assistant_text_segments_all(
+                            &sess,
+                            &turn_context,
+                            plan_mode_state.as_mut(),
+                            &mut assistant_message_stream_parsers,
+                        )
+                        .await;
+                        sess.record_observed_response_completed(
+                            &turn_context,
+                            &response_id,
+                            token_usage.as_ref(),
+                            usage_metadata.as_ref(),
+                        )
+                        .await;
+                        let budget_result = sess
+                            .record_token_usage_info(
+                                &turn_context,
+                                &step_context.settings,
+                                token_usage.as_ref(),
+                                super::TokenUsageContext::Sampling,
+                            )
+                            .await;
+                        should_emit_token_count = true;
+                        should_emit_turn_diff = true;
+                        if let Err(err) = budget_result {
+                            break Err(err);
+                        }
+                        if let Some(false) = end_turn {
+                            needs_follow_up = true;
+                        }
+                        break Ok(SamplingAttempt::Finished(SamplingRequestResult {
+                            needs_follow_up,
+                            last_agent_message,
+                        }));
+                    }
                 }
-                break Ok(SamplingRequestResult {
-                    needs_follow_up,
-                    last_agent_message,
-                });
             }
             ResponseEvent::OutputTextDelta(delta) => {
+                if replay_enabled && !matches!(active_item, Some(TurnItem::Reasoning(_))) {
+                    continue;
+                }
                 // In review child threads, suppress assistant text deltas; the
                 // UI will show a selection popup from the final ReviewOutput.
                 if let Some(active) = active_item.as_ref() {

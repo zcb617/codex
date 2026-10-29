@@ -1575,6 +1575,12 @@ impl ModelClientSession {
             })
     }
 
+    /// 丢掉当前 WebSocket 续接用的响应 id，使下一次 prepare 不能接上被截断响应。
+    pub(crate) fn discard_websocket_continuation(&mut self, reason: &'static str) {
+        self.websocket_session.last_response_rx = None;
+        self.websocket_session.continuation_reset_reason = Some(reason);
+    }
+
     fn prepare_websocket_request(
         &mut self,
         request: &ResponsesApiRequest,
