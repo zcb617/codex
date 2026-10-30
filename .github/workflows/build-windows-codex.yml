@@ -18,6 +18,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   build-windows-x64:
     name: Build codex (x86_64-pc-windows-msvc)
@@ -29,6 +32,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Enable Git long paths
+        shell: pwsh
+        run: git config --global core.longpaths true
 
       # @ref is the compiler this action installs. It does not read
       # codex-rs/rust-toolchain.toml. Keep it equal to that file's channel.
