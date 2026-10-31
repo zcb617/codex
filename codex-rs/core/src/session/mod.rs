@@ -4055,7 +4055,7 @@ impl Session {
         // Read the step's model and record its environments together so an update cannot split them.
         // Match apply_turn_settings and activate_turn_environments: active_turn before state.
         // Wait for executor startup below, after releasing both locks.
-        let (mut settings, environments, inherited_environments) = {
+        let (settings, environments, inherited_environments) = {
             let _active = self
                 .active_turn
                 .lock()
@@ -4070,24 +4070,6 @@ impl Session {
                     .then(|| self.services.turn_environments.configured_snapshot_now()),
             )
         };
-        if matches!(
-            turn_context.session_source,
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-        ) {
-            let root_service_tier = self.services.agent_control.service_tier();
-            if settings.selected().service_tier != root_service_tier {
-                let mut selected = settings.selected().clone();
-                selected.service_tier = root_service_tier;
-                let mut inherited_settings = ResolvedStepSettings::new(
-                    Arc::new(selected),
-                    Arc::clone(&settings.model_info),
-                    &self.features,
-                );
-                inherited_settings.mcp_approvals_reviewer_override =
-                    settings.mcp_approvals_reviewer_override;
-                settings = Arc::new(inherited_settings);
-            }
-        }
         let dynamic_tools = self.dynamic_tools().await;
         let token_budget = token_budget::resolve_token_budget(
             turn_context.configured_token_budget.as_ref(),

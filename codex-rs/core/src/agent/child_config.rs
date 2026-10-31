@@ -81,7 +81,6 @@ pub(crate) async fn prepare_agent_spawn_config(
                 .clone_from(&turn.developer_instructions);
         }
     }
-    apply_spawn_agent_service_tier(session, &mut config).await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     // Remember an applied configured default so cold reload reapplies its restrictions.
@@ -129,9 +128,11 @@ pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, St
     Ok(config)
 }
 
+/// Builds a child-owned default tier baseline shared by spawn and resume config snapshots.
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, String> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
+    config.service_tier = Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string());
     if config
         .features
         .enabled(Feature::SubagentDefaultContextLimits)
@@ -257,34 +258,6 @@ async fn apply_requested_spawn_agent_model_overrides(
         config.model_reasoning_effort = Some(reasoning_effort);
     }
 
-    Ok(())
-}
-
-pub(crate) async fn apply_spawn_agent_service_tier(
-    session: &Session,
-    config: &mut Config,
-) -> Result<(), String> {
-    let Some(service_tier) = session.services.agent_control.service_tier() else {
-        config.service_tier = None;
-        return Ok(());
-    };
-    if service_tier == SERVICE_TIER_DEFAULT_REQUEST_VALUE {
-        config.service_tier = Some(service_tier);
-        return Ok(());
-    }
-
-    let model = config.model.clone().ok_or_else(|| {
-        "spawn_agent could not resolve the child model for service tier validation".to_string()
-    })?;
-    let model_info = session
-        .services
-        .models_manager
-        .get_model_info(model.as_str(), &config.to_models_manager_config())
-        .await;
-
-    config.service_tier = model_info
-        .supports_service_tier(service_tier.as_str())
-        .then_some(service_tier);
     Ok(())
 }
 

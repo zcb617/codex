@@ -1,7 +1,6 @@
 use super::*;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
-use crate::agent::child_config::apply_spawn_agent_service_tier;
 use crate::agent::child_config::build_agent_resume_config;
 use crate::agent::child_config::build_agent_spawn_config;
 use crate::config::AgentRoleConfig;
@@ -44,7 +43,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::ClientMcpExtensions;
@@ -500,6 +499,7 @@ async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override() {
         .expect("fork_turns=all should apply agent_type overrides");
 }
 
+/// Builds a catalog where the test child model does not advertise fast service tiers.
 fn service_tier_test_catalog() -> codex_protocol::openai_models::ModelsResponse {
     let mut catalog = codex_models_manager::bundled_models_response().expect("bundled models");
     let mut model = catalog
@@ -516,33 +516,86 @@ fn service_tier_test_catalog() -> codex_protocol::openai_models::ModelsResponse 
     catalog
 }
 
+/// Verifies a child role can select a supported tier independently of the root model.
 #[tokio::test]
-async fn spawn_agent_service_tier_uses_root_preference_when_root_model_cannot_support_it() {
-    let (_session, turn) = make_session_and_context().await;
+async fn spawn_agent_service_tier_uses_role_preference_when_root_model_cannot_support_it() {
+    let (mut session, turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config.model = Some("test-model-without-fast".to_string());
     config.model_catalog = Some(service_tier_test_catalog());
-    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    config.service_tier = Some("priority".to_string());
+    let role_config_path = config.codex_home.as_path().join("priority-role.toml");
+    tokio::fs::create_dir_all(&config.codex_home)
+        .await
+        .expect("codex home should be created");
+    tokio::fs::write(
+        &role_config_path,
+        "model = \"gpt-5.5\"\nservice_tier = \"priority\"\n",
+    )
+    .await
+    .expect("role config should be written");
+    config.agent_roles.insert(
+        "priority-role".to_string(),
+        AgentRoleConfig {
+            description: Some("Role with an independent priority tier".to_string()),
+            config_file: Some(role_config_path),
+            nickname_candidates: None,
+        },
+    );
+    session.services.models_manager = Arc::new(StaticModelsManager::new(
+        /*auth_manager*/ None,
+        service_tier_test_catalog(),
+        codex_models_manager::ModelOrigin::ExplicitConfig,
+    ));
+    let mut turn = turn
+        .with_model(
+            "test-model-without-fast".to_string(),
+            &session.services.models_manager,
+        )
+        .await;
+    turn.config = Arc::new(config.clone());
     let manager = thread_manager();
     let root = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("root thread should start");
     assert_eq!(root.thread.config_snapshot().await.service_tier, None);
+    set_agent_control(&mut session, manager.agent_control());
+    session.thread_id = root.thread_id;
 
-    config.model = Some("gpt-5.5".to_string());
-    apply_spawn_agent_service_tier(root.thread.session.as_ref(), &mut config)
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "agent_type": "priority-role"
+            })),
+        ))
         .await
-        .expect("root preference should be resolved against the child model");
+        .expect("spawn_agent should apply role tier against the child model");
+    let (content, _) = expect_text_output(output);
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        /// Spawned child thread ID used to inspect its resolved config.
+        agent_id: String,
+    }
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let snapshot = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
 
-    assert_eq!(
-        config.service_tier,
-        Some(ServiceTier::Fast.request_value().to_string())
-    );
+    assert_eq!(snapshot.service_tier, Some("priority".to_string()));
 }
 
+/// Verifies spawn starts at the child default and applies only explicitly configured role tiers.
 #[tokio::test]
-async fn spawn_agent_service_tier_inheritance_uses_root_preference_and_child_model() {
+async fn spawn_agent_service_tier_is_independent_of_root_preference_and_child_model() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -555,7 +608,7 @@ async fn spawn_agent_service_tier_inheritance_uses_root_preference_and_child_mod
             .await;
         let mut config = (*turn.config).clone();
         config.model_catalog = Some(service_tier_test_catalog());
-        config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+        config.service_tier = Some("priority".to_string());
         turn.config = Arc::new(config);
         let manager = thread_manager();
         let root = manager
@@ -585,7 +638,7 @@ async fn spawn_agent_service_tier_inheritance_uses_root_preference_and_child_mod
                 function_payload(json!({"message": "inspect this repo"})),
             ))
             .await
-            .expect("spawn_agent should inherit a supported parent service tier");
+            .expect("spawn_agent should use the child default tier");
         let (content, _) = expect_text_output(output);
         let result: SpawnAgentResult =
             serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -598,7 +651,7 @@ async fn spawn_agent_service_tier_inheritance_uses_root_preference_and_child_mod
 
         assert_eq!(
             snapshot.service_tier,
-            Some(ServiceTier::Fast.request_value().to_string())
+            Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string())
         );
     }
 
@@ -609,7 +662,7 @@ async fn spawn_agent_service_tier_inheritance_uses_root_preference_and_child_mod
             .await;
         let mut config = (*turn.config).clone();
         config.model_catalog = Some(service_tier_test_catalog());
-        config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+        config.service_tier = Some("priority".to_string());
         turn.config = Arc::new(config);
         let manager = thread_manager();
         let root = manager
@@ -642,7 +695,7 @@ async fn spawn_agent_service_tier_inheritance_uses_root_preference_and_child_mod
                 })),
             ))
             .await
-            .expect("spawn_agent should clear unsupported inherited service tier");
+            .expect("spawn_agent should keep the child default tier");
         let (content, _) = expect_text_output(output);
         let result: SpawnAgentResult =
             serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -653,7 +706,10 @@ async fn spawn_agent_service_tier_inheritance_uses_root_preference_and_child_mod
             .config_snapshot()
             .await;
 
-        assert_eq!(snapshot.service_tier, None);
+        assert_eq!(
+            snapshot.service_tier,
+            Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string())
+        );
     }
 
     {
@@ -705,7 +761,7 @@ service_tier = "priority"
                 })),
             ))
             .await
-            .expect("spawn_agent should ignore the child role service tier");
+            .expect("spawn_agent should apply the child role service tier");
         let (content, _) = expect_text_output(output);
         let result: SpawnAgentResult =
             serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -716,12 +772,18 @@ service_tier = "priority"
             .config_snapshot()
             .await;
 
-        assert_eq!(snapshot.service_tier, None);
+        assert_eq!(snapshot.service_tier, Some("priority".to_string()));
     }
 }
 
+/// Verifies configured child tiers remain independent of the root preference.
+#[test_case::test_case("default", Some("default"); "explicit default")]
+#[test_case::test_case("turbo", None; "unsupported tier")]
 #[tokio::test]
-async fn spawn_agent_role_service_tier_cannot_override_root_preference() {
+async fn spawn_agent_role_service_tier_is_independent_of_root_preference(
+    role_tier: &'static str,
+    expected_service_tier: Option<&'static str>,
+) {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -737,16 +799,14 @@ async fn spawn_agent_role_service_tier_cannot_override_root_preference() {
     let role_config_path = turn.config.codex_home.as_path().join("tiered-role.toml");
     tokio::fs::write(
         &role_config_path,
-        r#"model = "gpt-5.5"
-service_tier = "turbo"
-"#,
+        format!("model = \"gpt-5.5\"\nservice_tier = \"{role_tier}\"\n"),
     )
     .await
     .expect("role config should be written");
 
     let role_name = "tiered-role".to_string();
     let mut config = (*turn.config).clone();
-    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    config.service_tier = Some("priority".to_string());
     config.agent_roles.insert(
         role_name.clone(),
         AgentRoleConfig {
@@ -782,7 +842,7 @@ service_tier = "turbo"
             })),
         ))
         .await
-        .expect("spawn_agent should fall back to the supported parent tier");
+        .expect("spawn_agent should keep the role's effective tier");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -795,12 +855,140 @@ service_tier = "turbo"
 
     assert_eq!(
         snapshot.service_tier,
-        Some(ServiceTier::Fast.request_value().to_string())
+        expected_service_tier.map(str::to_string)
     );
 }
 
+/// Verifies a closed V1 child reloads its configured tier without inheriting the root tier.
+#[test_case::test_case("priority", "default", "default"; "root priority and child default")]
+#[test_case::test_case("default", "priority", "priority"; "root default and child priority")]
 #[tokio::test]
-async fn spawn_agent_full_history_fork_inherits_root_service_tier() {
+async fn resume_spawned_agent_restores_its_role_service_tier(
+    root_tier: &'static str,
+    role_tier: &'static str,
+    expected_service_tier: &'static str,
+) {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        /// Spawned child thread ID used for shutdown and resume.
+        agent_id: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let mut turn = turn
+        .with_model("gpt-5.5".to_string(), &session.services.models_manager)
+        .await;
+    tokio::fs::create_dir_all(&turn.config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let role_config_path = turn
+        .config
+        .codex_home
+        .as_path()
+        .join("resume-tier-role.toml");
+    tokio::fs::write(
+        &role_config_path,
+        format!("model = \"gpt-5.5\"\nservice_tier = \"{role_tier}\"\n"),
+    )
+    .await
+    .expect("role config should be written");
+
+    let role_name = "resume-tier-role".to_string();
+    let mut config = (*turn.config).clone();
+    config.service_tier = Some(root_tier.to_string());
+    config.agent_roles.insert(
+        role_name.clone(),
+        AgentRoleConfig {
+            description: Some("Role for child tier resume coverage".to_string()),
+            config_file: Some(role_config_path),
+            nickname_candidates: None,
+        },
+    );
+    turn.config = Arc::new(config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    set_agent_control(
+        &mut session,
+        root.thread
+            .session
+            .services
+            .local_agent_runtime
+            .control(root.thread.session.session_id()),
+    );
+    session.thread_id = root.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "agent_type": role_name
+            })),
+        ))
+        .await
+        .expect("spawn_agent should create the role-configured child");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let agent_id = parse_agent_id(&result.agent_id);
+    assert_eq!(
+        manager
+            .get_thread(agent_id)
+            .await
+            .expect("spawned child should exist")
+            .config_snapshot()
+            .await
+            .service_tier,
+        Some(expected_service_tier.to_string())
+    );
+
+    let _ = manager
+        .agent_control()
+        .shutdown_live_agent(agent_id)
+        .await
+        .expect("shutdown child before resume");
+    let resume_output = ResumeAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "resume_agent",
+            function_payload(json!({"id": result.agent_id})),
+        ))
+        .await
+        .expect("resume_agent should restore the child");
+    let (content, success) = expect_text_output(resume_output);
+    let resume_result: resume_agent::ResumeAgentResult =
+        serde_json::from_str(&content).expect("resume_agent result should be json");
+    assert_ne!(resume_result.status, AgentStatus::NotFound);
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        manager
+            .get_thread(agent_id)
+            .await
+            .expect("resumed child should exist")
+            .config_snapshot()
+            .await
+            .service_tier,
+        Some(expected_service_tier.to_string())
+    );
+
+    let _ = manager
+        .agent_control()
+        .shutdown_live_agent(agent_id)
+        .await
+        .expect("shutdown resumed child");
+}
+
+/// Verifies a V1 full-history fork starts from its own default tier.
+#[tokio::test]
+async fn spawn_agent_full_history_fork_does_not_inherit_root_service_tier() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -811,7 +999,7 @@ async fn spawn_agent_full_history_fork_inherits_root_service_tier() {
         .with_model("gpt-5.5".to_string(), &session.services.models_manager)
         .await;
     let mut config = (*turn.config).clone();
-    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    config.service_tier = Some("priority".to_string());
     turn.config = Arc::new(config);
     let manager = thread_manager();
     let root = manager
@@ -839,7 +1027,7 @@ async fn spawn_agent_full_history_fork_inherits_root_service_tier() {
             })),
         ))
         .await
-        .expect("full-history fork should inherit the root service tier");
+        .expect("full-history fork should use the child default tier");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -852,12 +1040,13 @@ async fn spawn_agent_full_history_fork_inherits_root_service_tier() {
 
     assert_eq!(
         snapshot.service_tier,
-        Some(ServiceTier::Fast.request_value().to_string())
+        Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string())
     );
 }
 
+/// Verifies a V2 full-history fork starts from its own default tier.
 #[tokio::test]
-async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
+async fn multi_agent_v2_full_history_fork_does_not_inherit_root_service_tier() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
@@ -868,7 +1057,7 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
         .with_model("gpt-5.5".to_string(), &session.services.models_manager)
         .await;
     let mut config = (*turn.config).clone();
-    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    config.service_tier = Some("priority".to_string());
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -902,7 +1091,7 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
             })),
         ))
         .await
-        .expect("multi-agent v2 full-history fork should inherit the root service tier");
+        .expect("multi-agent v2 full-history fork should use the child default tier");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -925,7 +1114,7 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
 
     assert_eq!(
         snapshot.service_tier,
-        Some(ServiceTier::Fast.request_value().to_string())
+        Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string())
     );
 }
 
@@ -4667,6 +4856,7 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
     expected.model_reasoning_effort = Some(ReasoningEffort::High);
     expected.model_reasoning_summary = Some(ReasoningSummary::Detailed);
     expected.developer_instructions = turn.developer_instructions.clone();
+    expected.service_tier = Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string());
     #[allow(deprecated)]
     {
         expected.cwd = turn.cwd.clone();
@@ -4720,6 +4910,7 @@ async fn build_agent_resume_config_clears_base_instructions() {
     expected.model_reasoning_effort = turn.reasoning_effort().cloned();
     expected.model_reasoning_summary = Some(turn.reasoning_summary());
     expected.developer_instructions = turn.developer_instructions.clone();
+    expected.service_tier = Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string());
     #[allow(deprecated)]
     {
         expected.cwd = turn.cwd.clone();

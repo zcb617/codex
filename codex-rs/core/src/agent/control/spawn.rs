@@ -330,6 +330,8 @@ impl LocalAgentControl {
             None
         };
         config.model_reasoning_effort = stored_reasoning_effort;
+        config.service_tier =
+            Some(codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string());
         if let Some(role_name) = session_source.get_agent_role() {
             let runtime_approval_policy = config.permissions.approval_policy.value();
             let runtime_approvals_reviewer = config.approvals_reviewer;
@@ -366,7 +368,6 @@ impl LocalAgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
-        config.service_tier = self.root_service_tier();
         if let Some(model) = stored_model {
             config.model = Some(model);
         }
@@ -990,7 +991,7 @@ impl LocalAgentControl {
 
     async fn resume_single_agent_from_rollout(
         &self,
-        config: Config,
+        mut config: Config,
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
@@ -1010,6 +1011,20 @@ impl LocalAgentControl {
             .map_err(|err| CodexErr::InvalidRequest(format!("invalid stored agent path: {err}")))?;
         let resumed_agent_nickname = stored_thread.agent_nickname.clone();
         let resumed_agent_role = stored_thread.agent_role.clone();
+        if matches!(
+            &session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        ) {
+            config.service_tier =
+                Some(codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string());
+            if let Some(role_name) = resumed_agent_role.as_deref() {
+                let mut role_config = config.clone();
+                apply_role_to_config(&mut role_config, Some(role_name))
+                    .await
+                    .map_err(CodexErr::InvalidRequest)?;
+                config.service_tier = role_config.service_tier;
+            }
+        }
         let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
