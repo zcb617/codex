@@ -18,7 +18,7 @@ Automate the recurring upgrade and CLI publish for **this** Codex fork (`zcb617/
 
 1. Base on upstream `rust-vX.Y.Z`
 2. Create `dev/from-rust-vX.Y.Z`
-3. Port local custom commits (PostCompact + skills metadata budget + daemon auto-start stays off + fork CLI publisher)
+3. Port local custom commits (PostCompact + skills metadata budget + daemon auto-start stays off + independent subagent service tiers + fork CLI publisher)
 4. Delete the upstream release workflows that the new tag brings back
 5. Locally verify files, constants, and workflows, then commit
 6. Push the branch and retarget `rust-vX.Y.Z` onto **fork HEAD** of **origin only** (`zcb617/codex`) so Actions publishes the GitHub Release. Do not ask. Never push to `upstream`.
@@ -158,6 +158,21 @@ default_enabled: false,
 
 上游如果已经是 `default_enabled: false`，保持即可，不要再改成打开。功能被上游删掉时，不要为了这项把它加回去。
 
+### F. 父子代理的服务等级独立
+
+保留 fork 对 `service_tier` 的修改：父代理开启或关闭 Fast 只影响父代理，不覆盖子代理的档位；子代理按自己的角色配置文件决定档位，未配置时使用 `default`。例如父代理为 `priority`、`finder.toml` 为 `default` 时，finder 不得发送 `priority`；父代理为 `default`、子代理配置 `priority` 时，子代理可以独立使用 Fast。模型支持情况和功能开关仍按现有规则过滤。
+
+每次升级按行为移植，不依赖旧提交哈希或固定行号。重点核对完整链路：
+
+- 创建子代理时，以独立的 `default` 为基线，再应用角色配置；不能在应用角色后用根代理档位覆盖，也不能从父代理复制出 Fast。
+- 已有子代理的后续模型请求和上下文压缩保持自己的档位，父代理切换 Fast 不改变子代理。
+- V1 恢复及 V2 卸载后重新加载时，重新使用子代理的角色档位；WebSocket 预连接及预热请求也使用子代理的档位。
+- 保留并适配对应测试：父子分别使用 `priority` / `default`、角色未配置、父代理中途切换、恢复、压缩和 WebSocket 预连接。不要改变父代理自己的 Fast 行为或其他模型、权限设置。
+
+当前实现主要位于 `codex-rs/core/src/agent/child_config.rs`、`codex-rs/core/src/agent/control/spawn.rs`、`codex-rs/core/src/session/mod.rs` 和 `codex-rs/core/src/session/startup_prewarm.rs`；相关测试在 `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`、`codex-rs/core/tests/suite/subagent_service_tier.rs` 和 `codex-rs/core/tests/suite/agent_websocket.rs`。上游重构后按新位置和接口保留相同行为。
+
+当前 `default` 在构造请求时会省略 `service_tier` 字段；若服务端将未指定的档位默认设为 Fast，实际服务档位仍由服务端决定。不要把本地配置值误报成服务端已确认的处理档位。
+
 ## Procedure
 
 ### 1. Fetch the tag
@@ -187,6 +202,7 @@ Prefer a **small clean set** on the new branch rather than replaying every inter
 | Docs for PostCompact | Redundant lockfile thrash from old minor versions |
 | Skills metadata budget (content-port if paths drifted) | Blind cherry-pick of old `Increase skills metadata context budget` SHA when files moved |
 | `daemon_auto_start` 保持默认关闭（section E） | 把上游默认打开的后台服务原样留下 |
+| 父子代理服务等级独立（section F） | 父代理 Fast 覆盖子代理角色配置 |
 | Final fork CLI publisher (`build-windows-codex.yml` on `rust-v*.*.*` **with `GH_REPO`**) | Stacked tiny workflow edits; publisher copies that omit `GH_REPO` |
 | Drop-upstream-release-workflows commit | — |
 
@@ -206,12 +222,12 @@ This checkout restores section C files. That is expected; remove them in step 4.
 
 ### 4. Port custom commits
 
-**Preferred:** cherry-pick feature/adapt/docs/budget/publisher/delete-upstream-release commits in order, resolve conflicts carefully. Port the skills budget by content (section D) if the old commit does not apply cleanly.
+**Preferred:** cherry-pick feature/adapt/docs/budget/publisher/delete-upstream-release commits in order, resolve conflicts carefully. Port the skills budget and independent subagent service tiers by content (sections D and F) if old commits do not apply cleanly.
 
 ```bash
 git cherry-pick <postcompact-sha> <api-adapt-sha> <docs-sha> <drop-upstream-release-sha>
-# Then port section D (skills budget) and section E (daemon_auto_start default off)
-# if cherry-pick of those changes fails or the feature spec moved
+# Then port sections D (skills budget), E (daemon_auto_start default off), and F
+# (independent subagent service tiers) if those changes fail to cherry-pick or paths moved
 ```
 
 On conflicts in `hooks.rs` / `compact.rs`:
@@ -272,6 +288,18 @@ rg -n -A 15 'DaemonAutoStart|daemon_auto_start' --glob '*.rs' codex-rs/features
 
 紧挨着 `id: Feature::DaemonAutoStart` 的 `default_enabled` 必须是 `false`。仍是 `true` 就停止升版，改完再查。不要只改 Linux。
 
+按 section F 静态核对子代理档位：检查创建、每次请求、V1/V2 恢复和 WebSocket 预连接均采用子代理自己的配置，并核对相关测试仍覆盖父子档位不一致及父代理切换的场景。可先搜索：
+
+```bash
+rg -n 'service_tier|root_service_tier|preconnect_service_tier' \
+  codex-rs/core/src/agent codex-rs/core/src/session \
+  codex-rs/core/src/tools/handlers/multi_agents_tests.rs \
+  codex-rs/core/tests/suite/subagent_service_tier.rs \
+  codex-rs/core/tests/suite/agent_websocket.rs
+```
+
+根代理自身仍可保留 `root_service_tier` 状态；关键是不能用它覆盖子代理。路径变化时按新架构追踪，不能只凭某个旧符号消失就判定通过。未保留 section F 的行为时停止升版并修正。
+
 Confirm publishers:
 
 ```bash
@@ -302,9 +330,10 @@ rm -f /tmp/upgrade-msg.txt
 - 压缩完成后立即注入 PostCompact additionalContext
 - skills 元数据上下文预算提高到 4% / 16000
 - 后台服务保持默认关闭
+- 父子代理服务等级独立配置
 ```
 
-这三条是当前要写进说明的强化功能（A、D、E）。以后新增一项强化功能，只在这里加一行功能名，同时补进 Custom content。没移植成功的功能不要写进说明。
+这四条是当前要写进说明的强化功能（A、D、E、F）。以后新增一项强化功能，只在这里加一行功能名，同时补进 Custom content。没移植成功的功能不要写进说明。
 
 ### 8. Publish to origin (same turn; do not ask)
 
@@ -381,6 +410,7 @@ After upgrade, `.github/workflows/build-windows-codex.yml` must:
 | Skills budget cherry-pick fails / files missing | Search the names in section D; patch current crate (`ext/skills` or `core-skills`); update tests and `2%` copy |
 | New branch still shows 8_000 / 2% | Stop; budget port did not land |
 | `daemon_auto_start` 仍是 `default_enabled: true` | 按 section E 改回默认关闭；三端共用这一处，不要只改一个系统 |
+| 父代理开启 Fast 后，子代理的 `default` 被覆盖 | 按 section F 检查创建、请求、恢复和预连接的父级覆盖逻辑，并保留独立档位测试 |
 | Dirty `Cargo.lock` without dependency changes | Prefer tag lockfile if no new crates |
 | Tag push built the wrong commit / no Release | Tag was still the upstream object; retarget onto fork HEAD and `git push --force origin "refs/tags/$TAG"` (origin only) |
 | `rust-release` workflow started on the fork | Section C files came back; delete them, they cannot succeed here |
@@ -408,9 +438,10 @@ git checkout -b "$BRANCH" "$TAG"
 # cherry-pick PostCompact feature/adapt/docs...
 # port skills metadata budget (16_000 / 4%) by content if needed
 # keep daemon_auto_start default_enabled false (section E)
+# keep parent and subagent service tiers independent (section F)
 # copy fork CLI publisher; delete section C workflows restored by the tag
 # 本机只核对文件、常量和发布工作流；四个平台的编译和类型检查由 GitHub Actions 完成
-# 收成一条提交：同步上游 $TAG，外加 A、D、E 三条强化功能，不要写 CLI 发布
+# 收成一条提交：同步上游 $TAG，外加 A、D、E、F 四条强化功能，不要写 CLI 发布
 # origin 必须是 zcb617/codex；禁止 git push upstream
 git push -u origin "$BRANCH"
 git tag -f "$TAG" HEAD
