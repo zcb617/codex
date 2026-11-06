@@ -1,6 +1,7 @@
 use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_core::X_CODEX_ROUTING_HINT_HEADER;
+use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::config_types::ServiceTier;
@@ -27,13 +28,17 @@ use std::time::Duration;
 
 const WS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 
-#[test_case::test_case("priority", true, false; "fast mode enabled")]
-#[test_case::test_case("priority", false, true; "fast mode disabled")]
-#[test_case::test_case("ultrafast", false, true; "ultrafast mode enabled")]
-#[test_case::test_case("ultrafast", true, false; "ultrafast mode disabled")]
+/// Verifies child role tier settings control the WebSocket handshake and warmup request.
+#[test_case::test_case("priority", Some("default"), true, false; "child explicit default")]
+#[test_case::test_case("priority", None, true, false; "child default without role tier")]
+#[test_case::test_case("default", Some("priority"), true, false; "child priority")]
+#[test_case::test_case("priority", Some("priority"), false, false; "priority mode disabled")]
+#[test_case::test_case("default", Some("ultrafast"), false, true; "child ultrafast")]
+#[test_case::test_case("priority", Some("ultrafast"), false, false; "ultrafast mode disabled")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
-    tier: &'static str,
+async fn spawned_agent_prewarm_handshake_uses_child_service_tier(
+    root_tier: &'static str,
+    role_tier: Option<&'static str>,
     fast_mode_enabled: bool,
     ultrafast_mode_enabled: bool,
 ) -> Result<()> {
@@ -48,7 +53,7 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
                     "spawn-worker",
                     "collaboration",
                     "spawn_agent",
-                    &json!({ "message": "hello", "task_name": "worker", "fork_turns": "none" })
+                    &json!({ "message": "hello", "task_name": "worker", "agent_type": "worker", "fork_turns": "none" })
                         .to_string(),
                 ),
                 ev_completed("root-spawn"),
@@ -67,20 +72,30 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
         ],
     ])
     .await;
-    let tier_enabled = if tier == "ultrafast" {
-        ultrafast_mode_enabled
-    } else {
-        fast_mode_enabled
+    let expected_child_tier = match role_tier {
+        Some("priority") if fast_mode_enabled => Some("priority"),
+        Some("ultrafast") if ultrafast_mode_enabled => Some("ultrafast"),
+        _ => None,
     };
+    let role_config_contents = role_tier
+        .map(|tier| format!("service_tier = \"{tier}\"\n"))
+        .unwrap_or_else(|| "developer_instructions = \"child role without a tier\"\n".to_string());
     let test = test_codex()
         .with_model("gpt-5.4")
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_model_info_override("gpt-5.4", move |model| {
-            model.service_tiers.push(ModelServiceTier {
-                id: tier.to_string(),
-                name: "Fast".to_string(),
-                description: "Priority processing".to_string(),
-            });
+        .with_model_info_override("gpt-5.4", |model| {
+            model.service_tiers.extend([
+                ModelServiceTier {
+                    id: "priority".to_string(),
+                    name: "Priority".to_string(),
+                    description: "Priority processing".to_string(),
+                },
+                ModelServiceTier {
+                    id: "ultrafast".to_string(),
+                    name: "Ultrafast".to_string(),
+                    description: "Ultrafast processing".to_string(),
+                },
+            ]);
         })
         .with_config(move |config| {
             for feature in [Feature::Collab, Feature::MultiAgentV2] {
@@ -101,7 +116,19 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
                 .features
                 .set_enabled(Feature::UltrafastMode, ultrafast_mode_enabled)
                 .expect("configure Ultra Fast mode");
-            config.service_tier = Some(tier.to_string());
+            let role_config_path = config.codex_home.join("worker-role.toml");
+            std::fs::create_dir_all(&config.codex_home).expect("create temporary codex home");
+            std::fs::write(&role_config_path, role_config_contents)
+                .expect("write child role config");
+            config.agent_roles.insert(
+                "worker".to_string(),
+                AgentRoleConfig {
+                    description: Some("WebSocket child tier test role".to_string()),
+                    config_file: Some(role_config_path.to_path_buf()),
+                    nickname_candidates: None,
+                },
+            );
+            config.service_tier = Some(root_tier.to_string());
         })
         .build_with_websocket_server(&server)
         .await?;
@@ -112,16 +139,10 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
     )
     .await?;
     test.codex
-        .start_or_steer_turn(
-            TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "spawn a worker".to_string(),
-                text_elements: Vec::new(),
-            }])
-            .with_thread_settings(ThreadSettingsOverrides {
-                service_tier: Some(Some(tier.to_string())),
-                ..Default::default()
-            }),
-        )
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "spawn a worker".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     let child_thread_id =
         tokio::time::timeout(Duration::from_secs(5), created_threads.recv()).await??;
@@ -134,11 +155,9 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
         "child startup should connect before its first turn"
     );
     let handshakes = server.handshakes();
-    let expected_hint = if tier_enabled {
-        format!("model=gpt-5.4;tier={tier}")
-    } else {
-        "model=gpt-5.4".to_string()
-    };
+    let expected_hint = expected_child_tier
+        .map(|tier| format!("model=gpt-5.4;tier={tier}"))
+        .unwrap_or_else(|| "model=gpt-5.4".to_string());
     assert_eq!(
         handshakes[1].header(X_CODEX_ROUTING_HINT_HEADER),
         Some(expected_hint)
@@ -150,10 +169,7 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
     .await?
     .body_json();
     assert_eq!(child_warmup["generate"], false);
-    assert_eq!(
-        child_warmup["service_tier"].as_str(),
-        tier_enabled.then_some(tier)
-    );
+    assert_eq!(child_warmup["service_tier"].as_str(), expected_child_tier);
     assert_eq!(server.handshakes().len(), 2);
     child.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;

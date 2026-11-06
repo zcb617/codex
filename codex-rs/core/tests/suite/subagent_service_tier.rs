@@ -1,4 +1,4 @@
-//! Verifies that root service-tier changes reach existing child turns and future work.
+//! Verifies that child service tiers stay independent from root tier changes.
 
 use anyhow::Result;
 use codex_core::TurnInputRequest;
@@ -62,7 +62,8 @@ fn assert_request_service_tier(request: &ResponseMock, expected: Option<&str>) {
     );
 }
 
-fn configure_priority_role(config: &mut Config) {
+/// Configures the service-tier role and feature policy used by child tier scenarios.
+fn configure_role(config: &mut Config, role_tier: &str) {
     for feature in [Feature::Collab, Feature::MultiAgentV2] {
         config
             .features
@@ -71,13 +72,13 @@ fn configure_priority_role(config: &mut Config) {
     }
     config.model_provider.request_max_retries = Some(0);
     config.model_provider.stream_max_retries = Some(0);
-    let role_path = config.codex_home.join("priority-worker.toml");
-    std::fs::write(&role_path, "service_tier = \"priority\"\n")
-        .expect("priority role should be written");
+    let role_path = config.codex_home.join("service-tier-worker.toml");
+    std::fs::write(&role_path, format!("service_tier = \"{role_tier}\"\n"))
+        .expect("service-tier role should be written");
     config.agent_roles.insert(
         PRIORITY_ROLE.to_string(),
         AgentRoleConfig {
-            description: Some("Role with a configured priority tier".to_string()),
+            description: Some("Role with a configured service tier".to_string()),
             config_file: Some(role_path.to_path_buf()),
             nickname_candidates: None,
         },
@@ -93,9 +94,9 @@ async fn mount_root_collaboration_call(
     prompt: &'static str,
     call_id: &'static str,
     arguments: serde_json::Value,
-) {
+) -> ResponseMock {
     let response_id = format!("root-{call_id}");
-    mount_sse_once_match(
+    let root_request = mount_sse_once_match(
         server,
         move |request: &wiremock::Request| {
             body_contains(request, prompt) && !body_contains(request, call_id)
@@ -126,6 +127,7 @@ async fn mount_root_collaboration_call(
         ]),
     )
     .await;
+    root_request
 }
 
 async fn mount_completed_child(
@@ -147,29 +149,32 @@ async fn mount_completed_child(
     .await
 }
 
-#[test_case(Some("priority"), None; "disabling fast mode updates active and idle child work")]
-#[test_case(Some("priority"), Some("default"); "explicit default updates active and idle child work")]
-#[test_case(None, Some("priority"); "enabling fast mode updates active and idle child work")]
+/// Verifies existing and newly spawned children keep their role tier after root updates.
+#[test_case(Some("priority"), None, "default"; "root priority to none with default role")]
+#[test_case(None, Some("priority"), "default"; "root none to priority with default role")]
+#[test_case(Some("priority"), Some("default"), "priority"; "root priority to default with priority role")]
+#[test_case(None, Some("priority"), "priority"; "root none to priority with priority role")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn root_service_tier_change_updates_existing_subagent(
+async fn root_service_tier_change_preserves_child_role_service_tier(
     initial_service_tier: Option<&str>,
     updated_service_tier: Option<&str>,
+    role_tier: &'static str,
 ) -> Result<()> {
     let server = start_mock_server().await;
     let initial_service_tier_owned = initial_service_tier.map(str::to_string);
-    let updated_request_service_tier = updated_service_tier
-        .filter(|service_tier| *service_tier != SERVICE_TIER_DEFAULT_REQUEST_VALUE);
+    let expected_request_service_tier =
+        (role_tier != SERVICE_TIER_DEFAULT_REQUEST_VALUE).then_some(role_tier);
     let mut builder = test_codex()
         .with_model("gpt-5.6-sol")
         .with_config(move |config| {
             config.service_tier = initial_service_tier_owned;
-            configure_priority_role(config);
+            configure_role(config, role_tier);
         });
     let test = builder.build_with_auto_env(&server).await?;
     assert!(!test.config.features.enabled(Feature::StepModelSwitching));
     let mut created_threads = test.thread_manager.subscribe_thread_created();
 
-    mount_root_collaboration_call(
+    let initial_root_request = mount_root_collaboration_call(
         &server,
         ROOT_PROMPT,
         SPAWN_CALL_ID,
@@ -214,10 +219,15 @@ async fn root_service_tier_change_updates_existing_subagent(
     )
     .await;
     test.submit_text_turn(ROOT_PROMPT).await?;
+    assert_request_service_tier(
+        &initial_root_request,
+        initial_service_tier
+            .filter(|service_tier| *service_tier != SERVICE_TIER_DEFAULT_REQUEST_VALUE),
+    );
     let child_thread_id = created_threads.recv().await?;
     let child = test.thread_manager.get_thread(child_thread_id).await?;
     let original_child_service_tier = child.config_snapshot().await.service_tier;
-    assert_eq!(original_child_service_tier.as_deref(), initial_service_tier);
+    assert_eq!(original_child_service_tier.as_deref(), Some(role_tier));
     wait_for_event_match(child.as_ref(), |event| match event {
         EventMsg::CollabWaitingBegin(request) if request.call_id == PAUSE_CALL_ID => Some(()),
         EventMsg::Error(error) => panic!("child failed before pausing: {}", error.message),
@@ -227,7 +237,7 @@ async fn root_service_tier_change_updates_existing_subagent(
         _ => None,
     })
     .await;
-    assert_request_service_tier(&initial_child_request, initial_service_tier);
+    assert_request_service_tier(&initial_child_request, expected_request_service_tier);
 
     submit_thread_settings(
         &test.codex,
@@ -250,7 +260,7 @@ async fn root_service_tier_change_updates_existing_subagent(
         }]))
         .await?;
     wait_for_turn_complete(&child).await;
-    assert_request_service_tier(&continued_child_request, updated_request_service_tier);
+    assert_request_service_tier(&continued_child_request, expected_request_service_tier);
 
     let child_compaction_request = mount_sse_once_match(
         &server,
@@ -270,7 +280,7 @@ async fn root_service_tier_change_updates_existing_subagent(
     .await;
     child.submit(Op::Compact).await?;
     wait_for_turn_complete(&child).await;
-    assert_request_service_tier(&child_compaction_request, updated_request_service_tier);
+    assert_request_service_tier(&child_compaction_request, expected_request_service_tier);
 
     let future_child_request = mount_completed_child(&server, FOLLOWUP_PROMPT, ROOT_PROMPT).await;
     child
@@ -280,9 +290,9 @@ async fn root_service_tier_change_updates_existing_subagent(
         }]))
         .await?;
     wait_for_turn_complete(&child).await;
-    assert_request_service_tier(&future_child_request, updated_request_service_tier);
+    assert_request_service_tier(&future_child_request, expected_request_service_tier);
 
-    mount_root_collaboration_call(
+    let fresh_root_request = mount_root_collaboration_call(
         &server,
         FRESH_ROOT_PROMPT,
         FRESH_SPAWN_CALL_ID,
@@ -297,27 +307,39 @@ async fn root_service_tier_change_updates_existing_subagent(
     let fresh_child_request =
         mount_completed_child(&server, FRESH_CHILD_PROMPT, FRESH_ROOT_PROMPT).await;
     test.submit_text_turn(FRESH_ROOT_PROMPT).await?;
+    assert_request_service_tier(
+        &fresh_root_request,
+        updated_service_tier
+            .filter(|service_tier| *service_tier != SERVICE_TIER_DEFAULT_REQUEST_VALUE),
+    );
     let fresh_thread_id = created_threads.recv().await?;
     let fresh_thread = test.thread_manager.get_thread(fresh_thread_id).await?;
     wait_for_turn_complete(&fresh_thread).await;
-    assert_request_service_tier(&fresh_child_request, updated_request_service_tier);
+    assert_request_service_tier(&fresh_child_request, expected_request_service_tier);
     Ok(())
 }
 
+/// Verifies a reloaded V2 child restores its own role tier after root changes.
+#[test_case::test_case("priority", Some("priority"), None; "priority role survives root reset")]
+#[test_case::test_case("default", None, Some("priority"); "default role survives root priority")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<()> {
+async fn evicted_role_subagent_retains_own_service_tier_after_reload(
+    role_tier: &'static str,
+    initial_service_tier: Option<&'static str>,
+    updated_service_tier: Option<&'static str>,
+) -> Result<()> {
     let server = start_mock_server().await;
     let mut builder = test_codex()
         .with_model("gpt-5.6-sol")
-        .with_config(|config| {
-            config.service_tier = Some("priority".to_string());
+        .with_config(move |config| {
+            config.service_tier = initial_service_tier.map(str::to_string);
             config.multi_agent_v2.max_concurrent_threads_per_session = 2;
-            configure_priority_role(config);
+            configure_role(config, role_tier);
         });
     let test = builder.build_with_auto_env(&server).await?;
     let mut created_threads = test.thread_manager.subscribe_thread_created();
 
-    mount_root_collaboration_call(
+    let _ = mount_root_collaboration_call(
         &server,
         ROOT_PROMPT,
         SPAWN_CALL_ID,
@@ -334,10 +356,12 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
     let original_thread_id = created_threads.recv().await?;
     let original_thread = test.thread_manager.get_thread(original_thread_id).await?;
     wait_for_turn_complete(&original_thread).await;
-    assert_request_service_tier(&original_request, Some("priority"));
+    let expected_request_service_tier =
+        (role_tier != SERVICE_TIER_DEFAULT_REQUEST_VALUE).then_some(role_tier);
+    assert_request_service_tier(&original_request, expected_request_service_tier);
     drop(original_thread);
 
-    mount_root_collaboration_call(
+    let _ = mount_root_collaboration_call(
         &server,
         FRESH_ROOT_PROMPT,
         FRESH_SPAWN_CALL_ID,
@@ -366,7 +390,7 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
     submit_thread_settings(
         &test.codex,
         ThreadSettingsOverrides {
-            service_tier: Some(None),
+            service_tier: Some(updated_service_tier.map(str::to_string)),
             ..Default::default()
         },
     )
@@ -377,8 +401,8 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
     let reloaded_thread = test.thread_manager.get_thread(original_thread_id).await?;
     assert_eq!(
         reloaded_thread.config_snapshot().await.service_tier,
-        test.codex.config_snapshot().await.service_tier,
-        "reload ignores the role tier and preserves the root-owned preference"
+        Some(role_tier.to_string()),
+        "reload restores the service tier from the child role"
     );
 
     let reloaded_request = mount_completed_child(&server, FOLLOWUP_PROMPT, ROOT_PROMPT).await;
@@ -389,7 +413,7 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
         }]))
         .await?;
     wait_for_turn_complete(&reloaded_thread).await;
-    assert_request_service_tier(&reloaded_request, /*expected*/ None);
+    assert_request_service_tier(&reloaded_request, expected_request_service_tier);
     reloaded_thread.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;
 
