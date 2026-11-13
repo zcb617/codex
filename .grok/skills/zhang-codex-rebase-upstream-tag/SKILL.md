@@ -20,7 +20,7 @@ Automate the recurring upgrade and CLI publish for **this** Codex fork (`zcb617/
 2. Create `dev/from-rust-vX.Y.Z`
 3. Port local custom commits (PostCompact + skills metadata budget + daemon auto-start stays off + independent subagent service tiers + fork CLI publisher)
 4. Delete the upstream release workflows that the new tag brings back
-5. Locally verify files, constants, and workflows, then commit
+5. Locally verify files, constants, workflows, and the merged source, then commit
 6. Push the branch and retarget `rust-vX.Y.Z` onto **fork HEAD** of **origin only** (`zcb617/codex`) so Actions publishes the GitHub Release. Do not ask. Never push to `upstream`.
 
 Always answer the user in **中文**.
@@ -32,6 +32,7 @@ Always answer the user in **中文**.
 允许：
 
 - `git` / `rg` / `test -f` 核对文件、常量和 workflow
+- 通读本次合并改过的源码，核对声明和后面的使用是否一致。这不是编译
 
 禁止（用户在本轮对话里明确要求覆盖之前一律不准）：
 
@@ -271,7 +272,22 @@ git checkout rust-vX.Y.Z -- codex-rs/Cargo.lock
 
 ### 6. Verify
 
-本机只核对文件、常量和发布工作流；不运行 `cargo check`。GitHub Actions 的 Windows、Linux 和两个 macOS 目标构建负责对应平台的编译和 Rust 类型检查。
+本机不运行 `cargo check`。GitHub Actions 负责四个平台的编译和打包。推送前仍要通读合并结果，不能只搜常量。
+
+先列出相对上游 tag 的改动，再把每个改过的 Rust 函数整段读完。自动合并的行和手改的行连在一起看。0.169 的失败就是自动合并留下 `let (settings, ...)`，冲突处理留下 `settings = ...`。
+
+```bash
+git diff --name-only "$TAG" -- '*.rs' '*.yml'
+```
+
+每一处都核对：
+
+- 后面有 `name =` 时，绑定必须是 `let mut`。对不上就先改，再提交
+- 调用的函数、字段、参数还在；删掉的参数，调用处一起改
+- 冲突两边不要各留一半：一边的条件配另一边的语句
+- 留下的绑定如果后面没有使用，确认该留的赋值是不是丢了
+
+然后继续核对文件、常量和发布工作流。
 
 After porting, confirm skills budget landed:
 
@@ -314,7 +330,7 @@ Fail the upgrade if `GH_REPO` is missing from the publish job. Without it, packi
 
 Linux 构建任务和发布任务的 `runs-on` 必须是 `ubuntu-26.04`。文件里再出现 `ubuntu-latest` 就停止升版并改掉。Linux 的 `cargo build` 前必须有 `CFLAGS="-march=x86-64 -mtune=generic"` 和同样的 `CXXFLAGS`。缺了就停止升版并补上。规则见 section B。
 
-本机静态核对到此结束。多平台编译和打包见 Local machine policy。
+上面的源码通读没过，停止升版。多平台编译和打包见 Local machine policy。
 
 ### 7. Commit
 
@@ -417,6 +433,7 @@ After upgrade, `.github/workflows/build-windows-codex.yml` must:
 | New branch still shows 8_000 / 2% | Stop; budget port did not land |
 | `daemon_auto_start` 仍是 `default_enabled: true` | 按 section E 改回默认关闭；三端共用这一处，不要只改一个系统 |
 | 父代理开启 Fast 后，子代理的 `default` 被覆盖 | 按 section F 检查创建、请求、恢复和预连接的父级覆盖逻辑，并保留独立档位测试 |
+| 四个平台同一处 `E0384`，`let` 绑定后又赋值 | 推送前没有把自动合并和手改连在一起读。改成 `let mut` 或去掉赋值，新提交后只 force-update origin 标签 |
 | Dirty `Cargo.lock` without dependency changes | Prefer tag lockfile if no new crates |
 | Tag push built the wrong commit / no Release | Tag was still the upstream object; retarget onto fork HEAD and `git push --force origin "refs/tags/$TAG"` (origin only) |
 | `rust-release` workflow started on the fork | Section C files came back; delete them, they cannot succeed here |
@@ -446,7 +463,8 @@ git checkout -b "$BRANCH" "$TAG"
 # keep daemon_auto_start default_enabled false (section E)
 # keep parent and subagent service tiers independent (section F)
 # copy fork CLI publisher; delete section C workflows restored by the tag
-# 本机只核对文件、常量和发布工作流；四个平台的编译和类型检查由 GitHub Actions 完成
+# 通读合并过的源码：声明和赋值、调用和参数必须一致；再核对文件、常量和发布工作流
+# 四个平台的编译和打包由 GitHub Actions 完成，本机不 cargo check
 # 收成一条提交：同步上游 $TAG，外加 A、D、E、F 四条强化功能，不要写 CLI 发布
 # origin 必须是 zcb617/codex；禁止 git push upstream
 git push -u origin "$BRANCH"
