@@ -4318,7 +4318,7 @@ impl Session {
         // Read the step's model and record its environments together so an update cannot split them.
         // Match apply_turn_settings and activate_turn_environments: active_turn before state.
         // Wait for executor startup below, after releasing both locks.
-        let (settings, environments, inherited_environments) = {
+        let (mut settings, environments, inherited_environments) = {
             let _active = self
                 .active_turn
                 .lock()
