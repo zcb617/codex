@@ -36,7 +36,7 @@ jobs:
     name: Build codex (x86_64-pc-windows-msvc)
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.linux_only != true }}
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     defaults:
       run:
         working-directory: codex-rs

@@ -82,7 +82,7 @@ These are the fork-local changes that must land on every new tag branch (names/s
 - File: `.github/workflows/build-windows-codex.yml` (filename historical; covers Win + Linux + macOS)
 - `on.push.tags: rust-v*.*.*` plus `workflow_dispatch`
 - Jobs (parallel):
-  - **Windows** `x86_64-pc-windows-msvc`: `codex`, `codex-code-mode-host`, `codex-windows-sandbox-setup`, `codex-command-runner` → sibling `dist/*.exe`
+  - **Windows** `x86_64-pc-windows-msvc`: `codex`, `codex-code-mode-host`, `codex-windows-sandbox-setup`, `codex-command-runner` → sibling `dist/*.exe`. Job `timeout-minutes` is **240**. A cold 0.169 build compiled in about 111 minutes, then `Post Cache cargo` was cancelled at the 120-minute job cap. The upload had already succeeded, but the job result was `cancelled`, so the release job never ran.
   - **Linux** `runs-on: ubuntu-26.04`（禁止 `ubuntu-latest`）。host build：`codex`、`codex-code-mode-host`。调用 `cargo build` 之前必须导出 `CFLAGS="-march=x86-64 -mtune=generic"` 和 `CXXFLAGS="-march=x86-64 -mtune=generic"`。26.04 的 gcc 默认 `x86-64-v3`（含 AVX）；没有 AVX 的老 CPU 会在进入主程序前非法指令退出。`-march=x86-64` 只要求 SSE2。不要再加别的 `-march`、`-mtune` 或目标 CPU 开关。
   - **发布** `publish-github-release` 同样 `runs-on: ubuntu-26.04`。这个任务不编译，不要给它加 `CFLAGS`。
   - 标签推送仍编译 Windows、Linux、两套 macOS。只换 Linux 包时用 `workflow_dispatch`：`linux_only=true`，`release_tag` 填已有标签。Windows 和 macOS 任务跳过，发布步骤只用新的 Linux 压缩包覆盖该 Release 里的同名文件。不要为了换 Linux 包去推标签。
@@ -412,7 +412,7 @@ After upgrade, `.github/workflows/build-windows-codex.yml` must:
 
 - [ ] `on.push.tags` is `rust-v*.*.*` (not a branch trigger)
 - [ ] `publish-github-release` exists, runs only when `github.ref_type == 'tag'`, and sets `GH_REPO`
-- [ ] Windows builds four bins (CLI + code-mode-host + two sandbox helpers)
+- [ ] Windows builds four bins (CLI + code-mode-host + two sandbox helpers); Windows job `timeout-minutes` is 240
 - [ ] Linux 与发布任务都是 `runs-on: ubuntu-26.04`，文件中没有 `ubuntu-latest`
 - [ ] Linux 的 `cargo build` 前导出 `CFLAGS` 和 `CXXFLAGS`，值都是 `-march=x86-64 -mtune=generic`
 - [ ] Linux builds `codex` + `codex-code-mode-host`
@@ -439,6 +439,7 @@ After upgrade, `.github/workflows/build-windows-codex.yml` must:
 | `rust-release` workflow started on the fork | Section C files came back; delete them, they cannot succeed here |
 | Publish job: `failed to run git: not a git repository` | Packing succeeded but `gh` had no repo; set `GH_REPO` on the publish job (do not re-run the old workflow file) |
 | macOS x86_64 job cancelled at 2h, rustc still running, no compile error | Cross-compile on `macos-latest` (arm64). Keep macos `timeout-minutes: 240`. Re-run of the old SHA keeps the old 120m cap; push the timeout commit and retarget the tag |
+| Windows job cancelled at 2h after the binaries uploaded | Compile finished, then `Post Cache cargo` hit `timeout-minutes: 120`. The job is `cancelled`, so publish does not run. Keep Windows `timeout-minutes: 240`. New commit; force-update origin `rust-v*` only |
 | macOS x86_64: `can't find crate for std` / target may not be installed | Publisher `@ref` is not `codex-rs/rust-toolchain.toml` `channel`, or the cross target was installed on a different compiler. Pin `dtolnay/rust-toolchain@<channel>`, then `rustup target add` that same toolchain. New commit; do not amend the upgrade commit. Force-update origin `rust-v*` only |
 
 ## Out of scope
