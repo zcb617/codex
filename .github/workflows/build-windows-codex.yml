@@ -152,7 +152,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs
-          shared-key: linux-codex-cli
+          shared-key: linux-codex-cli-x86-64
 
       - name: Configure rusty_v8 artifacts
         id: rusty_v8
@@ -187,6 +187,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # ubuntu-26.04 gcc defaults to x86-64-v3. That puts AVX into
+          # aws-lc's CPUID constructor, which runs before main.
+          export CFLAGS="-march=x86-64 -mtune=generic"
+          export CXXFLAGS="-march=x86-64 -mtune=generic"
           cargo build --release --target x86_64-unknown-linux-gnu \
             --bin codex \
             --bin codex-code-mode-host
