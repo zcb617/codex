@@ -6,11 +6,21 @@
 #   git tag rust-v0.149.1
 #   git push origin rust-v0.149.1
 #
-# workflow_dispatch still builds artifacts only; it does not create a Release.
+# workflow_dispatch with linux_only replaces only the Linux archive on an
+# existing Release. A normal workflow_dispatch still builds artifacts only.
 name: Build Windows Linux and macOS Codex CLI
 
 on:
   workflow_dispatch:
+    inputs:
+      linux_only:
+        description: 只编译 Linux，并替换已有 Release 里的 Linux 包
+        type: boolean
+        default: false
+      release_tag:
+        description: 要替换的 Release 标签，例如 rust-v0.168.0
+        type: string
+        default: ""
   push:
     tags:
       - "rust-v*.*.*"
@@ -24,6 +34,7 @@ env:
 jobs:
   build-windows-x64:
     name: Build codex (x86_64-pc-windows-msvc)
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.linux_only != true }}
     runs-on: windows-latest
     timeout-minutes: 120
     defaults:
@@ -225,6 +236,7 @@ jobs:
 
   build-macos:
     name: Build codex (${{ matrix.target }})
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.linux_only != true }}
     runs-on: macos-latest
     # macos-latest is arm64; x86_64 is cross-compiled and can exceed 2h.
     timeout-minutes: 240
@@ -334,7 +346,19 @@ jobs:
       - build-windows-x64
       - build-linux-x64
       - build-macos
-    if: github.ref_type == 'tag'
+    if: |
+      always() && (
+        (
+          github.ref_type == 'tag' &&
+          needs.build-windows-x64.result == 'success' &&
+          needs.build-linux-x64.result == 'success' &&
+          needs.build-macos.result == 'success'
+        ) || (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.linux_only == true &&
+          needs.build-linux-x64.result == 'success'
+        )
+      )
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -350,10 +374,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          LINUX_ONLY: ${{ inputs.linux_only }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
 
-          tag="${GITHUB_REF_NAME}"
+          linux_only="${LINUX_ONLY:-false}"
+          if [[ "${linux_only}" == "true" ]]; then
+            tag="${RELEASE_TAG}"
+            if [[ -z "${tag}" ]]; then
+              echo "linux_only 必须填写 release_tag" >&2
+              exit 1
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
           # Tag names contain slashes; flatten for archive filenames.
           asset_tag="${tag//\//-}"
           mkdir -p release-assets
@@ -384,20 +419,22 @@ jobs:
             done
           }
 
-          win_dir="$(artifact_dir codex-x86_64-pc-windows-msvc codex.exe)"
-          require_files "${win_dir}" \
-            codex.exe \
-            codex-code-mode-host.exe \
-            codex-windows-sandbox-setup.exe \
-            codex-command-runner.exe
-          (
-            cd "${win_dir}"
-            zip "${GITHUB_WORKSPACE}/release-assets/codex-${asset_tag}-x86_64-pc-windows-msvc.zip" \
+          if [[ "${linux_only}" != "true" ]]; then
+            win_dir="$(artifact_dir codex-x86_64-pc-windows-msvc codex.exe)"
+            require_files "${win_dir}" \
               codex.exe \
               codex-code-mode-host.exe \
               codex-windows-sandbox-setup.exe \
               codex-command-runner.exe
-          )
+            (
+              cd "${win_dir}"
+              zip "${GITHUB_WORKSPACE}/release-assets/codex-${asset_tag}-x86_64-pc-windows-msvc.zip" \
+                codex.exe \
+                codex-code-mode-host.exe \
+                codex-windows-sandbox-setup.exe \
+                codex-command-runner.exe
+            )
+          fi
 
           linux_dir="$(artifact_dir codex-x86_64-unknown-linux-gnu codex)"
           require_files "${linux_dir}" codex codex-code-mode-host
@@ -406,19 +443,21 @@ jobs:
             codex \
             codex-code-mode-host
 
-          macos_arm_dir="$(artifact_dir codex-aarch64-apple-darwin codex)"
-          require_files "${macos_arm_dir}" codex codex-code-mode-host
-          tar -C "${macos_arm_dir}" -czf \
-            "release-assets/codex-${asset_tag}-aarch64-apple-darwin.tar.gz" \
-            codex \
-            codex-code-mode-host
+          if [[ "${linux_only}" != "true" ]]; then
+            macos_arm_dir="$(artifact_dir codex-aarch64-apple-darwin codex)"
+            require_files "${macos_arm_dir}" codex codex-code-mode-host
+            tar -C "${macos_arm_dir}" -czf \
+              "release-assets/codex-${asset_tag}-aarch64-apple-darwin.tar.gz" \
+              codex \
+              codex-code-mode-host
 
-          macos_x64_dir="$(artifact_dir codex-x86_64-apple-darwin codex)"
-          require_files "${macos_x64_dir}" codex codex-code-mode-host
-          tar -C "${macos_x64_dir}" -czf \
-            "release-assets/codex-${asset_tag}-x86_64-apple-darwin.tar.gz" \
-            codex \
-            codex-code-mode-host
+            macos_x64_dir="$(artifact_dir codex-x86_64-apple-darwin codex)"
+            require_files "${macos_x64_dir}" codex codex-code-mode-host
+            tar -C "${macos_x64_dir}" -czf \
+              "release-assets/codex-${asset_tag}-x86_64-apple-darwin.tar.gz" \
+              codex \
+              codex-code-mode-host
+          fi
 
           ls -lh release-assets/
 

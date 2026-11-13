@@ -82,7 +82,9 @@ These are the fork-local changes that must land on every new tag branch (names/s
 - `on.push.tags: rust-v*.*.*` plus `workflow_dispatch`
 - Jobs (parallel):
   - **Windows** `x86_64-pc-windows-msvc`: `codex`, `codex-code-mode-host`, `codex-windows-sandbox-setup`, `codex-command-runner` → sibling `dist/*.exe`
-  - **Linux** `ubuntu-latest` host build: `codex`, `codex-code-mode-host`
+  - **Linux** `runs-on: ubuntu-26.04`（禁止 `ubuntu-latest`）。host build：`codex`、`codex-code-mode-host`。调用 `cargo build` 之前必须导出 `CFLAGS="-march=x86-64 -mtune=generic"` 和 `CXXFLAGS="-march=x86-64 -mtune=generic"`。26.04 的 gcc 默认 `x86-64-v3`（含 AVX）；没有 AVX 的老 CPU 会在进入主程序前非法指令退出。`-march=x86-64` 只要求 SSE2。不要再加别的 `-march`、`-mtune` 或目标 CPU 开关。
+  - **发布** `publish-github-release` 同样 `runs-on: ubuntu-26.04`。这个任务不编译，不要给它加 `CFLAGS`。
+  - 标签推送仍编译 Windows、Linux、两套 macOS。只换 Linux 包时用 `workflow_dispatch`：`linux_only=true`，`release_tag` 填已有标签。Windows 和 macOS 任务跳过，发布步骤只用新的 Linux 压缩包覆盖该 Release 里的同名文件。不要为了换 Linux 包去推标签。
   - **macOS** matrix `macos-latest`: `aarch64-apple-darwin` + `x86_64-apple-darwin` → `codex` + `codex-code-mode-host`. Job `timeout-minutes` is **240** (x86_64 is cross-compiled on arm64 runners and can exceed 2h)
 - After copying the previous publisher, set every `dtolnay/rust-toolchain@` ref to the `channel` in `codex-rs/rust-toolchain.toml`, and pass that file's `components`. The action installs the `@ref` compiler; it does not read `rust-toolchain.toml`. On the macOS job, also run `rustup target add "${{ matrix.target }}" --toolchain <channel>` so the x86_64 cross std is on that same compiler. A mismatch previously installed 1.95.0 while 0.164.0 required 1.99.1, and the x86_64 job died with `can't find crate for std`.
 - Tag builds: `publish-github-release` waits for all platform jobs, packs archives, creates/updates the GitHub Release for that tag
@@ -305,10 +307,12 @@ Confirm publishers:
 ```bash
 test -f .github/workflows/build-windows-codex.yml
 test ! -e .github/workflows/rust-release.yml
-rg -n 'rust-v\*\.\*\.\*|publish-github-release|GH_REPO' .github/workflows/build-windows-codex.yml
+rg -n 'rust-v\*\.\*\.\*|publish-github-release|GH_REPO|ubuntu-26\.04|ubuntu-latest|march=x86-64' .github/workflows/build-windows-codex.yml
 ```
 
 Fail the upgrade if `GH_REPO` is missing from the publish job. Without it, packing succeeds then `gh release` dies with `not a git repository`.
+
+Linux 构建任务和发布任务的 `runs-on` 必须是 `ubuntu-26.04`。文件里再出现 `ubuntu-latest` 就停止升版并改掉。Linux 的 `cargo build` 前必须有 `CFLAGS="-march=x86-64 -mtune=generic"` 和同样的 `CXXFLAGS`。缺了就停止升版并补上。规则见 section B。
 
 本机静态核对到此结束。多平台编译和打包见 Local machine policy。
 
@@ -393,6 +397,8 @@ After upgrade, `.github/workflows/build-windows-codex.yml` must:
 - [ ] `on.push.tags` is `rust-v*.*.*` (not a branch trigger)
 - [ ] `publish-github-release` exists, runs only when `github.ref_type == 'tag'`, and sets `GH_REPO`
 - [ ] Windows builds four bins (CLI + code-mode-host + two sandbox helpers)
+- [ ] Linux 与发布任务都是 `runs-on: ubuntu-26.04`，文件中没有 `ubuntu-latest`
+- [ ] Linux 的 `cargo build` 前导出 `CFLAGS` 和 `CXXFLAGS`，值都是 `-march=x86-64 -mtune=generic`
 - [ ] Linux builds `codex` + `codex-code-mode-host`
 - [ ] macOS matrix builds arm64 + x86_64 (`codex` + `codex-code-mode-host`); macos job `timeout-minutes` is 240
 - [ ] Artifacts uploaded per platform
