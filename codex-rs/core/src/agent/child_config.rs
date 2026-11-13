@@ -70,14 +70,12 @@ pub(crate) async fn prepare_agent_spawn_config(
         options.reasoning_effort,
     )
     .await?;
-    let shares_service_tier = match &session.agent_runtime {
-        AgentRuntimeServices::Controller => true,
-        AgentRuntimeServices::Host(services) => services.service_tier.is_some(),
-    };
-    if !shares_service_tier {
-        // Inherit the parent's thread preference before applying child role overrides.
-        config.service_tier = session.thread_settings_snapshot().await.service_tier;
-    }
+    // Child sessions start from the default tier in the shared config, then apply their role.
+    // A host that installs a shared tier provider still owns that tier. Controller Fast does not.
+    let shares_host_service_tier = matches!(
+        &session.agent_runtime,
+        AgentRuntimeServices::Host(services) if services.service_tier.is_some()
+    );
     if !options.full_history_fork
         || (options.version == SpawnConfigVersion::V2 && options.role_name.is_some())
     {
@@ -91,7 +89,7 @@ pub(crate) async fn prepare_agent_spawn_config(
                 .clone_from(&turn.developer_instructions);
         }
     }
-    if shares_service_tier {
+    if shares_host_service_tier {
         apply_spawn_agent_service_tier(session, &mut config).await?;
     }
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
@@ -141,9 +139,11 @@ pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, St
     Ok(config)
 }
 
+/// Builds a child-owned default tier baseline shared by spawn and resume config snapshots.
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, String> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
+    config.service_tier = Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string());
     if config
         .features
         .enabled(Feature::SubagentDefaultContextLimits)

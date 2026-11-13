@@ -4297,16 +4297,10 @@ impl Session {
         .await
     }
 
-    fn inherits_root_service_tier(&self, session_source: &SessionSource) -> bool {
-        match &self.agent_runtime {
-            crate::agent::host::AgentRuntimeServices::Controller => matches!(
-                session_source,
-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-            ),
-            crate::agent::host::AgentRuntimeServices::Host(_) => {
-                crate::agent::host::host_child_uses_shared_service_tier(self)
-            }
-        }
+    fn inherits_root_service_tier(&self) -> bool {
+        // Controller children keep the tier from their own role. A host provider can still
+        // publish one shared tier to its children.
+        crate::agent::host::host_child_uses_shared_service_tier(self)
     }
 
     #[expect(
@@ -4324,7 +4318,7 @@ impl Session {
         // Read the step's model and record its environments together so an update cannot split them.
         // Match apply_turn_settings and activate_turn_environments: active_turn before state.
         // Wait for executor startup below, after releasing both locks.
-        let (mut settings, environments, inherited_environments) = {
+        let (settings, environments, inherited_environments) = {
             let _active = self
                 .active_turn
                 .lock()
@@ -4339,7 +4333,7 @@ impl Session {
                     .then(|| self.services.turn_environments.configured_snapshot_now()),
             )
         };
-        if self.inherits_root_service_tier(&turn_context.session_source) {
+        if self.inherits_root_service_tier() {
             let root_service_tier = tokio::select! {
                 biased;
                 tier = crate::agent::host::service_tier(self, settings.selected().service_tier.clone()) => tier,
