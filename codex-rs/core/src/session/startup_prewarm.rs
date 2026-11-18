@@ -338,11 +338,9 @@ async fn schedule_startup_prewarm_inner(
     );
     let startup_cancellation_token = CancellationToken::new();
     let preconnect_model_info = Arc::clone(startup_turn_context.model_info());
-    // Spawned subagents inherit the root's selection, with the same feature and model filtering
-    // that capture applies to the actual request.
-    let inherits_root_service_tier =
-        session.inherits_root_service_tier(&startup_turn_context.session_source);
-    let preconnect_service_tier = if inherits_root_service_tier {
+    // Controller children use the tier captured on their own turn. Host-provider children
+    // still read the shared host tier, with the same feature and model filtering as capture.
+    let preconnect_service_tier = if session.inherits_root_service_tier() {
         crate::session::get_service_tier(
             crate::agent::host::service_tier(
                 &session,
